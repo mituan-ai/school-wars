@@ -100,18 +100,19 @@ export type GameEvent =
   | { kind: 'annihilated'; col: number; result: 'none' | 'win' | 'lose'; persistent: boolean };
 
 export type RuleSet = 'classic' | 'remake';
-export type AiLevel = 'classic' | 'easy' | 'normal' | 'hard';
+/** 'human'：由玩家控制（联机局里每个人类座位都标成它；单机只用 user_col） */
+export type AiLevel = 'classic' | 'easy' | 'normal' | 'hard' | 'human';
 
 /** 规则。classic + classic AI 与原版完全一致；remake 为"校园战争"优化规则（docs/03）。 */
 export interface Rules {
   ruleset: RuleSet;
-  /** 每个阵营的电脑 AI（玩家阵营忽略） */
+  /** 每个阵营的电脑 AI（user_col 与标为 'human' 的阵营忽略） */
   ai: AiLevel[];
 }
 
 export const CLASSIC_RULES: Rules = { ruleset: 'classic', ai: ['classic', 'classic', 'classic', 'classic'] };
 
-export function remakeRules(level: Exclude<AiLevel, 'classic'> = 'normal'): Rules {
+export function remakeRules(level: Exclude<AiLevel, 'classic' | 'human'> = 'normal'): Rules {
   return { ruleset: 'remake', ai: [level, level, level, level] };
 }
 
@@ -120,7 +121,7 @@ export interface Game {
   rng: Rng;
   tick: number;
   rules: Rules;
-  /** 0–3 为玩家阵营，4 为观战 */
+  /** 0–3 为玩家阵营，4 为观战。联机局的共享状态里固定为 4，本机座位只在界面层 */
   user_col: number;
   /** bmap[by][bx].pat / .n 展平为 by * BSIZE + bx */
   bmap_pat: number[];
@@ -158,8 +159,17 @@ export interface OrderCommand {
 /** 设置集结点（bx < 0 表示取消） */
 export interface RallyCommand {
   type: 'rally';
+  /** 设置集结点的阵营；省略时为玩家阵营 */
+  col?: number;
   bx: number;
   by: number;
 }
 
-export type Command = OrderCommand | RallyCommand;
+/** 联机：某阵营改由玩家或电脑控制（掉线托管、重连交还）。只由权威发出 */
+export interface ControlCommand {
+  type: 'control';
+  col: number;
+  ai: AiLevel;
+}
+
+export type Command = OrderCommand | RallyCommand | ControlCommand;

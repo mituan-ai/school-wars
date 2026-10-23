@@ -17,6 +17,7 @@ import { openSaveLoad, openSettings } from './panels.ts';
 export interface TitleHooks {
   onPick: (col: number) => void;
   onLoad: (g: Game) => void;
+  onOnline: () => void;
 }
 
 export class TitleScreen {
@@ -113,6 +114,7 @@ export class TitleScreen {
               },
             }, t('title.continue'))
           : null,
+        h('button', { class: 'btn', onClick: () => this.hooks.onOnline() }, t('title.online')),
         h('button', { class: 'btn ghost', onClick: () => openSaveLoad('load', null, (g) => this.hooks.onLoad(g)) }, t('title.load')),
         h('button', { class: 'btn ghost', onClick: () => this.hooks.onPick(WATCH_COL) }, t('title.watch')),
         h('button', { class: 'btn ghost', onClick: () => openSettings(() => this.build()) }, t('title.settings')),

@@ -7,7 +7,7 @@
 [简体中文](README.md) | English
 
 [![Play online](https://img.shields.io/badge/play_online-schoolwars.yhdmt.site-e8513f?style=flat-square)](https://schoolwars.yhdmt.site)
-[![Version](https://img.shields.io/badge/version-v0.2.0-3fb35e?style=flat-square)](https://github.com/mituan-ai/school-wars/releases)
+[![Version](https://img.shields.io/badge/version-v0.3.0-3fb35e?style=flat-square)](https://github.com/mituan-ai/school-wars/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white)
 ![Zero runtime dependencies](https://img.shields.io/badge/runtime_deps-0-8b5cf6?style=flat-square)
@@ -25,12 +25,13 @@ The remake first rebuilt every rule of the original SWF function by function. It
 - **Two rule sets, switchable in Settings**
   - **School Wars (default)**: games reach an ending and fights feel fair. Games still undecided after 40 minutes fell from 57% in the original to 1.7%.
   - **Classic**: a frame-exact recreation of the original, including the original AI.
+- **Four-player online play**: when creating a room, pick **Server mode** (the game runs on the server, everyone gets the same latency, and nobody's disconnect affects the others) or **Player-host mode** (the game runs in the host's browser and the others connect to the host directly, so the data takes the short route). Empty seats can be filled with computer players at a chosen level. A player who drops is covered by the computer after 15 seconds and gets their school back on return. If the host leaves, another player takes over automatically.
 - **An AI that doesn't cheat**: the computer plays by the same rules and uses the same commands as you. There are three levels (Easy, Normal, Hard), and each school has its own personality.
 - **Four races, one trait each**: Humans capture faster, Orcs swarm, Dwarves heal faster and Elves are harder to hit. Each has its own look, building and yard.
 - **Comfortable controls**: pathfinding that walks around people, precise clicking with a glowing outline on selected students, attack-move (`A`), one-key retreat to heal (`H`), route lines, control groups, rally points, threat alerts and hover tooltips.
 - **Everything redrawn**: students, school buildings, camp tents, springs and the campus greenery are drawn in code, and the sound effects are synthesized with WebAudio. The repository contains no original assets.
 - **Chinese and English UI**, plus saving and loading (3 manual slots and an autosave, with import and export), pause and 2× speed, and a colorblind mode.
-- **Instant play**: it runs in the browser with no runtime dependencies. The production bundle is about 112 KB (39 KB gzipped).
+- **Instant play**: it runs in the browser with no runtime dependencies. The production bundle is about 146 KB (50 KB gzipped). Online play also needs a small Node service (rooms, signalling, relay, and the game itself in Server mode).
 
 <div align="center">
 <img src="docs/images/title-en.png" alt="Title screen: choose your school" width="860">
@@ -107,6 +108,19 @@ All numbers come from reproducible headless simulations (`npm run sim`, capped a
 
 At regular intervals, a commander reassesses the board and assigns each student to one of four tasks: retreat, defend, expand or attack. It can only issue the same commands a player can, never reads hidden information, and gets no stat bonuses. The three levels differ only in reaction speed, coordination and whether the AI focuses its fire.
 
+## 🌐 Online play
+
+On the title screen choose "Online", enter a name, pick a mode and a ruleset, create a room and send your friends the invite link (`?room=CODE`). The lobby shows each player's latency to the server and whether each pair of players can connect directly (and how fast), and it recommends a mode based on those measurements.
+
+| | Server mode | Player-host mode |
+|---|---|---|
+| Where the game runs | The server | The host's browser |
+| Latency | Each player's round trip to the server, the same for everyone | The direct round trip to the host, usually much lower within one city or country. The host has almost zero latency |
+| Players who can't connect directly | — | Relayed through the server automatically (latency is roughly both players' latency to the server added together) |
+| Drops and leaving | Nobody else is affected. The computer takes over after 15 seconds | Same. If the host drops, a new host takes over after 4 seconds and the game pauses for a few seconds |
+
+Both modes send only commands. Your own orders take effect on your screen on the next tick without waiting for a network round trip. Online games have no pause, speed control or saves. The design, trade-offs, measurements and remaining limitations are in [docs/05_联机方案.md](docs/05_联机方案.md) (Chinese).
+
 ## 🚀 Running locally
 
 Requires [Node.js](https://nodejs.org/) **22.18** or newer, because the command-line tools run `.ts` files directly.
@@ -116,12 +130,14 @@ git clone https://github.com/mituan-ai/school-wars.git
 cd school-wars
 npm install
 npm run dev          # dev server; open the printed URL
+npm run server       # in a second terminal: the online service (127.0.0.1:8787; the dev server forwards /net to it)
 ```
 
 | Command | What it does |
 |---|---|
-| `npm run build` | Type-check and build to `dist/` (plain static files that any web server can host) |
-| `npm test` | 65 rule, pathfinding, AI and simulation tests |
+| `npm run build` | Type-check and build: the web app to `dist/` (plain static files) and the online service to `dist-server/server.mjs` (run it with `node dist-server/server.mjs` and have your web server proxy WebSocket traffic on `/net` to it) |
+| `npm test` | 90 rule, pathfinding, AI, simulation and networking tests |
+| `NET_DELAY=110 npm run server` | Adds 110 ms each way to the online service to simulate a 220 ms round trip locally. Add `?relay=1` to the page URL to disable direct connections |
 | `npm run sim -- 300 40 --rules remake --ai normal` | Headless AI-only games: game count, minute cap, rules, difficulty |
 | `npm run sim -- 100 40 --rules remake --vs hard,classic` | Two AIs control two schools each; reports which AI wins |
 | `node tools/balance.ts 160 '17,12,28,12' '4,4,3,5' '1500,500,1500,1500' normal` | Sweep school stats (capture, heal and hit-taken traits can follow) |
@@ -143,8 +159,10 @@ src/core/          pure logic; runs headless in Node
   ai-commander.ts  new AI commander
   sim.ts           main loop and commands
   save.ts          saves (v3, migrates older versions)
+src/net/           online play: protocol, authority, client prediction, links, WebRTC, browser session
+server/            online service: rooms, signalling, relay, the Server-mode authority
 src/render/        isometric board, campus scenery, vector students, minimap, effects
-src/ui/            title, in-game HUD, menus, save/load and settings
+src/ui/            title, in-game HUD, online lobby, menus, save/load and settings
 src/i18n/          Chinese / English
 src/audio/         synthesized sound effects
 tests/             Vitest tests; e2e/ holds a browser smoke script
@@ -157,10 +175,12 @@ tools/             simulation stats, stat sweeps
 - [docs/02_重构方案.md](docs/02_重构方案.md): technology choices, architecture and milestones
 - [docs/03_优化方案.md](docs/03_优化方案.md): the new rules, AI, controls and visuals, with measured results and targets not yet met
 - [docs/04_体验升级方案.md](docs/04_体验升级方案.md): v0.2 pathfinding, selection, the four races, camps and springs, campus scenery and level-up feedback
+- [docs/05_联机方案.md](docs/05_联机方案.md): v0.3 four-player online play: the sync model, the trade-offs between the two modes, drops and host handover, implementation status and limitations
 
 ## 🗺️ Roadmap
 
 - [ ] Race balance on Hard (Elves are currently too weak)
+- [ ] Online: measurements on real networks, and an optional TURN relay to cut latency when direct connections fail
 - [ ] A pixel-style CJK font and optional background music
 - [ ] Pre-rendered student poses to cut rendering cost further
 - [ ] Touch support

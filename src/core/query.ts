@@ -26,6 +26,11 @@ export function baseFallen(g: Game, col: number): boolean {
  * "众矢之的"：存在领先者时，非领先者阵营 col 只能对领先者动手。
  * "校园战争"规则下，本部已沦陷的阵营不受这条保护。
  */
+/** 由玩家控制的阵营：单机的 user_col，或联机局里标为 'human' 的阵营 */
+export function isHuman(g: Game, col: number): boolean {
+  return col === g.user_col || g.rules.ai[col] === 'human';
+}
+
 export function topBlocks(g: Game, col: number, targetCol: number): boolean {
   if (g.top < 0 || col === g.top || targetCol === g.top) return false;
   if (g.rules.ruleset === 'remake' && targetCol >= 0 && baseFallen(g, targetCol)) return false;

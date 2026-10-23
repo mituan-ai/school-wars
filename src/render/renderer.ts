@@ -56,6 +56,8 @@ export interface ViewState {
   hoverPn?: number;
   /** 已按 A，下一次点地面是进攻移动 */
   amove?: boolean;
+  /** 本机玩家的阵营（联机局的共享状态里 user_col 固定为 4）；省略时用 g.user_col */
+  me?: number;
 }
 
 export interface Fx {
@@ -86,6 +88,9 @@ export interface Interp {
   prevX: Float64Array;
   prevY: Float64Array;
   alpha: number;
+  /** 联机预测被纠正时的画面偏移（逐渐收回） */
+  offX?: Float64Array;
+  offY?: Float64Array;
 }
 
 export function newInterp(): Interp {
@@ -95,7 +100,9 @@ export function newInterp(): Interp {
 export function unitPos(g: Game, ip: Interp, pn: number): [number, number] {
   const p = g.people[pn];
   const a = ip.alpha;
-  return [ip.prevX[pn] + (p.px - ip.prevX[pn]) * a, ip.prevY[pn] + (p.py - ip.prevY[pn]) * a];
+  const ox = ip.offX ? ip.offX[pn] : 0;
+  const oy = ip.offY ? ip.offY[pn] : 0;
+  return [ip.prevX[pn] + (p.px - ip.prevX[pn]) * a + ox, ip.prevY[pn] + (p.py - ip.prevY[pn]) * a + oy];
 }
 
 /** 大格中心的世界坐标 */
@@ -284,7 +291,7 @@ export function render(
     ctx.fillRect(x, y, Math.abs(r.x2 - r.x1), Math.abs(r.y2 - r.y1));
     ctx.strokeRect(x + 0.5, y + 0.5, Math.abs(r.x2 - r.x1), Math.abs(r.y2 - r.y1));
   }
-  return { mm: withMinimap ? drawMinimap(ctx, g, cam, fx, now) : null };
+  return { mm: withMinimap ? drawMinimap(ctx, g, cam, fx, now, view.me ?? g.user_col) : null };
 }
 
 function drawEffects(ctx: CanvasRenderingContext2D, g: Game, ip: Interp, fx: Fx, now: number): void {
@@ -1142,7 +1149,8 @@ function win(ctx: CanvasRenderingContext2D, x: number, y: number, side: number, 
 
 /** 集结点：从本部到集结点的虚线和一面小旗 */
 function drawRally(ctx: CanvasRenderingContext2D, g: Game, view: ViewState, now: number): void {
-  const pl = g.player[g.user_col];
+  const me = view.me ?? g.user_col;
+  const pl = g.player[me];
   if (!pl || pl.rally_bx < 0) {
     if (view.baseSelected && pl) {
       const [x, y] = tileCenter(pl.basex, pl.basey);
@@ -1155,7 +1163,7 @@ function drawRally(ctx: CanvasRenderingContext2D, g: Game, view: ViewState, now:
   }
   const [x0, y0] = tileCenter(pl.basex, pl.basey);
   const [x1, y1] = tileCenter(pl.rally_bx, pl.rally_by);
-  const color = FACTION[g.user_col].ui;
+  const color = FACTION[me].ui;
   ctx.save();
   ctx.globalAlpha = view.baseSelected ? 0.95 : 0.45;
   ctx.setLineDash([5, 5]);
@@ -1217,7 +1225,7 @@ export interface MinimapRect {
   oy: number;
 }
 
-function drawMinimap(ctx: CanvasRenderingContext2D, g: Game, cam: Camera, fx: Fx, now: number): MinimapRect {
+function drawMinimap(ctx: CanvasRenderingContext2D, g: Game, cam: Camera, fx: Fx, now: number, me: number): MinimapRect {
   const w = Math.round(Math.min(260, Math.max(170, cam.w * 0.2)));
   const s = w / (BOARD_W * 2 + 40);
   const h = Math.round((BOARD_H + 40) * s);
@@ -1258,9 +1266,9 @@ function drawMinimap(ctx: CanvasRenderingContext2D, g: Game, cam: Camera, fx: Fx
     if (p.stat <= PS.DEAD) continue;
     const dx = ox + p.px * s;
     const dy = oy + (p.py + 6) * s;
-    ctx.fillStyle = p.col === g.user_col ? '#ffffff' : FACTION[p.col].ui;
+    ctx.fillStyle = p.col === me ? '#ffffff' : FACTION[p.col].ui;
     ctx.fillRect(dx - 1.5, dy - 1.5, 3, 3);
-    if (p.col === g.user_col) {
+    if (p.col === me) {
       ctx.fillStyle = FACTION[p.col].ui;
       ctx.fillRect(dx - 0.8, dy - 0.8, 1.6, 1.6);
     }

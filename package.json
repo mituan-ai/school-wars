@@ -1,7 +1,7 @@
 {
   "name": "school-wars-remake",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "校园战争 School Wars — a fan remake of GAMEDESIGN's Flash RTS",
   "license": "MIT",
   "repository": {
@@ -14,17 +14,20 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && vite build -c vite.server.config.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "sim": "node tools/sim-watch.ts"
+    "sim": "node tools/sim-watch.ts",
+    "server": "node server/main.ts"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
+    "@types/ws": "^8.18.2",
     "typescript": "6.0.3",
     "vite": "8.3.3",
-    "vitest": "5.0.3"
+    "vitest": "5.0.3",
+    "ws": "^8.22.0"
   }
 }

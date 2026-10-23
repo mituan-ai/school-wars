@@ -14,5 +14,5 @@
     "noFallthroughCasesInSwitch": false,
     "skipLibCheck": true
   },
-  "include": ["src", "tests", "tools"]
+  "include": ["src", "tests", "tools", "server"]
 }

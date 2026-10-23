@@ -7,7 +7,7 @@
 简体中文 | [English](README.en.md)
 
 [![在线试玩](https://img.shields.io/badge/在线试玩-schoolwars.yhdmt.site-e8513f?style=flat-square)](https://schoolwars.yhdmt.site)
-[![版本](https://img.shields.io/badge/版本-v0.2.0-3fb35e?style=flat-square)](https://github.com/mituan-ai/school-wars/releases)
+[![版本](https://img.shields.io/badge/版本-v0.3.0-3fb35e?style=flat-square)](https://github.com/mituan-ai/school-wars/releases)
 [![许可证](https://img.shields.io/badge/许可证-MIT-blue?style=flat-square)](LICENSE)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white)
 ![零运行时依赖](https://img.shields.io/badge/运行时依赖-0-8b5cf6?style=flat-square)
@@ -26,11 +26,12 @@
   - **校园战争（默认）**：对局能收尾，战斗更讲理。40 分钟分不出胜负的对局从原版的 57% 降到 1.7%。
   - **经典规则**：逐帧复刻原版，包括原版电脑 AI。
 - **不作弊的电脑**：电脑和玩家用同样的规则、同样的指令。分简单、普通、困难三档，四所学校各有性格。
+- **四人联机**：建房时选**服务器模式**（对局跑在服务器上，人人延迟相同，谁掉线都不影响别人）或**玩家主机模式**（对局跑在房主浏览器里，其他人直连房主，数据不绕远路）。空座位可放电脑并选难度；掉线 15 秒由电脑代管，回来交还；房主离开会自动换人。
 - **四个种族，各有一条特性**：人族占领快、兽人人海、矮人回血快、精灵难被打中。外形、校舍、院子各不相同。
 - **顺手的操作**：会绕路的寻路、点哪选哪的选中与发光描边、进攻移动（`A`）、一键撤退回血（`H`）、行进路线、编队、集结点、威胁提醒、悬停说明。
 - **全部重新绘制**：角色、校舍、营地帐篷、泉水和校园草木都用代码绘制，音效用 WebAudio 合成。仓库里没有任何原版素材。
 - **中文 / English 双语**，带存档读档（3 个手动档位 + 自动存档，可导出、导入）、暂停与倍速、色弱模式。
-- **打开就能玩**：纯浏览器运行，没有运行时依赖，打包后约 112 KB（gzip 后 39 KB）。
+- **打开就能玩**：纯浏览器运行，没有运行时依赖，打包后约 146 KB（gzip 后 50 KB）。联机另需一个小的 Node 服务（房间、信令、中转，服务器模式下也跑对局）。
 
 <div align="center">
 <img src="docs/images/title-zh.png" alt="标题画面：选择你的学校" width="860">
@@ -98,6 +99,19 @@
 
 指挥官每隔一段时间评估一次局势，把学生分配到撤退、防守、扩张、进攻四类任务。它只能下达和玩家一样的指令，不读取任何玩家看不到的信息，也没有属性加成。三档难度的差别只在反应速度、协同程度和是否集火。
 
+## 🌐 联机
+
+标题画面点"联机对战"，填名字、选模式和规则后建房，把邀请链接（`?room=房间号`）发给朋友。大厅里会显示每个人到服务器的延迟、每两人之间能否直连及其延迟，并按测得的数据建议用哪种模式。
+
+| | 服务器模式 | 玩家主机模式 |
+|---|---|---|
+| 对局在哪里跑 | 服务器 | 房主的浏览器 |
+| 延迟 | 每人到服务器的往返延迟，人人一样 | 到房主的直连延迟，同城、同国通常低得多；房主几乎零延迟 |
+| 直连不上的人 | — | 自动经服务器中转（延迟约为两人到服务器的延迟之和） |
+| 掉线、离开 | 不影响别人；15 秒后电脑代管 | 同左；房主断开 4 秒后换人，对局暂停几秒 |
+
+两种模式都只传指令，自己的操作在本机下一帧就生效，不用等网络往返。联机局没有暂停、倍速和存档。设计、取舍、实测数据和仍有的限制见 [docs/05_联机方案.md](docs/05_联机方案.md)。
+
 ## 🚀 本地运行
 
 需要 [Node.js](https://nodejs.org/) **22.18** 或更高版本（命令行工具直接运行 `.ts` 文件）。
@@ -107,12 +121,14 @@ git clone https://github.com/mituan-ai/school-wars.git
 cd school-wars
 npm install
 npm run dev          # 开发服务器，浏览器打开显示的地址
+npm run server       # 另开一个终端：联机服务（127.0.0.1:8787，开发服务器会把 /net 转给它）
 ```
 
 | 命令 | 作用 |
 |---|---|
-| `npm run build` | 类型检查 + 生产构建到 `dist/`（纯静态文件，任何 Web 服务器都能托管） |
-| `npm test` | 65 项规则、寻路、AI 与模拟测试 |
+| `npm run build` | 类型检查 + 生产构建：网页到 `dist/`（纯静态文件），联机服务到 `dist-server/server.mjs`（`node dist-server/server.mjs` 运行，由 Web 服务器把 `/net` 的 WebSocket 反代过去） |
+| `npm test` | 90 项规则、寻路、AI、模拟与联机测试 |
+| `NET_DELAY=110 npm run server` | 联机服务每个方向加 110 ms 延迟，本机模拟往返 220 ms；网址加 `?relay=1` 强制不直连 |
 | `npm run sim -- 300 40 --rules remake --ai normal` | 无头跑观战局：局数、最长分钟、规则、难度 |
 | `npm run sim -- 100 40 --rules remake --vs hard,classic` | 两种 AI 各控制两所学校，统计胜者 |
 | `node tools/balance.ts 160 '17,12,28,12' '4,4,3,5' '1500,500,1500,1500' normal` | 阵营数值扫参（后面还可以跟占领、回血、被命中三项特性） |
@@ -134,8 +150,10 @@ src/core/          纯逻辑，可在 Node 中无头运行
   ai-commander.ts  新电脑指挥官
   sim.ts           主循环与指令
   save.ts          存档（v3，自动迁移旧版）
+src/net/           联机：协议、权威、客户端预测、链路、WebRTC、浏览器端会话
+server/            联机服务：房间、信令、中转、服务器模式的权威
 src/render/        等距地图、校园景物、矢量角色、小地图、特效
-src/ui/            标题、对局界面、菜单、存读档与设置
+src/ui/            标题、对局界面、联机大厅、菜单、存读档与设置
 src/i18n/          中文 / English
 src/audio/         WebAudio 合成音效
 tests/             Vitest 测试；e2e/ 为浏览器冒烟脚本
@@ -148,10 +166,12 @@ tools/             观战统计、数值扫参
 - [docs/02_重构方案.md](docs/02_重构方案.md)：技术选型、架构与里程碑
 - [docs/03_优化方案.md](docs/03_优化方案.md)：新规则、新 AI、操作与画面的设计，以及实测数据和未达标项
 - [docs/04_体验升级方案.md](docs/04_体验升级方案.md)：v0.2 的寻路、选中、四个种族、营地 / 泉水、校园场景与升级反馈
+- [docs/05_联机方案.md](docs/05_联机方案.md)：v0.3 的四人联机：同步模型、两种模式的取舍、掉线与换房主、实现状态与限制
 
 ## 🗺️ 路线图
 
 - [ ] 困难难度下的种族平衡（目前精灵偏弱）
+- [ ] 联机：真实网络下的实测；可选的 TURN 中继，改善直连不上时的延迟
 - [ ] 像素风中文字体、可选的背景音乐
 - [ ] 学生姿势预渲染为位图，进一步降低渲染开销
 - [ ] 触屏支持

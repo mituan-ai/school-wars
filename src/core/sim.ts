@@ -3,6 +3,7 @@ import { ADDX, ADDY, BSIZE, PMAX, PS, SSIZE } from './constants.ts';
 import { com_orders } from './ai-classic.ts';
 import { commander } from './ai-commander.ts';
 import { check_add_people } from './spawn.ts';
+import { isHuman } from './query.ts';
 import { random } from './rng.ts';
 import { decay_areas, people_action, start_walk, walk_to_cell } from './unit.ts';
 import type { Command, Game, GameEvent } from './types.ts';
@@ -18,7 +19,7 @@ export function step(g: Game, commands: readonly Command[] = []): GameEvent[] {
   if (g.rules.ruleset === 'remake') decay_areas(g);
   com_orders(g);
   for (let col = 0; col < 4; col++) {
-    if (col === g.user_col || g.rules.ai[col] === 'classic' || !g.player[col].exist) continue;
+    if (isHuman(g, col) || g.rules.ai[col] === 'classic' || !g.player[col].exist) continue;
     for (const c of commander(g, col)) applyCommand(g, c);
   }
   check_add_people(g);
@@ -28,8 +29,12 @@ export function step(g: Game, commands: readonly Command[] = []): GameEvent[] {
 
 // 862/f5:99-120 —— 按槽位编号顺序给选中的己方单位下令
 export function applyCommand(g: Game, c: Command): void {
+  if (c.type === 'control') {
+    if (c.col >= 0 && c.col < 4) g.rules.ai[c.col] = c.ai;
+    return;
+  }
   if (c.type === 'rally') {
-    const pl = g.player[g.user_col];
+    const pl = g.player[c.col ?? g.user_col];
     if (!pl) return;
     pl.rally_bx = c.bx;
     pl.rally_by = c.by;

@@ -6,7 +6,7 @@ import {
   TRAIT_CAPTURE, TRAIT_HEAL, TRAIT_HIT_TAKEN,
 } from './constants.ts';
 import { freeCellNear, nextDir, STEP_WAIT } from './path.ts';
-import { baseFallen, topBlocks } from './query.ts';
+import { baseFallen, isHuman, topBlocks } from './query.ts';
 import { random } from './rng.ts';
 import type { Area, Game, Person } from './types.ts';
 
@@ -84,7 +84,7 @@ export function start_sit(g: Game, pn: number): void {
       if (o.col === col) continue;
       if (Math.abs(o.cx - p.cx) + Math.abs(o.cy - p.cy) > AGGRO_RANGE) continue;
       // 存在领先者时，电脑阵营只打领先者（862/f3:80）
-      if (col !== g.user_col && topBlocks(g, col, o.col)) continue;
+      if (!isHuman(g, col) && topBlocks(g, col, o.col)) continue;
       cand.push(i);
     }
     if (cand.length > 0) {

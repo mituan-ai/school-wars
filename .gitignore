@@ -3,9 +3,4 @@ dist/
 .playwright-cli/
 *.log
 
-# 原版素材：仅供本地考证，不进入版本库（重制版使用全新美术与音效）
-School_Wars_original_gamedesign.swf
-School_Wars_decompiled_AS/
-School_Wars_assets/
-School_Wars_reconstructed/
 test-results/

@@ -1,6 +1,19 @@
 // 规则层的小查询，供单位、刷兵和 AI 共用
-import { BSIZE } from './constants.ts';
-import type { Game } from './types.ts';
+import {
+  BSIZE, REMAKE_APPEAR, REMAKE_HP, REMAKE_PUNCH, SPEC_APPEAR, SPEC_HP, SPEC_PUNCH, STAR_KILLS, STAR_MAX,
+} from './constants.ts';
+import type { Game, RuleSet } from './types.ts';
+
+/** 阵营数值（按规则集） */
+export function factionSpec(ruleset: RuleSet, col: number): { hp: number; punch: number; appear: number } {
+  if (ruleset === 'remake') return { hp: REMAKE_HP[col], punch: REMAKE_PUNCH[col], appear: REMAKE_APPEAR[col] };
+  return { hp: SPEC_HP[col], punch: SPEC_PUNCH[col], appear: SPEC_APPEAR[col] };
+}
+
+/** 头顶星级：每击倒 3 人一颗，最多 3 颗（仅"校园战争"规则显示） */
+export function stars(lev: number): number {
+  return Math.min(STAR_MAX, Math.floor(lev / STAR_KILLS));
+}
 
 /** 某阵营的本部是否已沦陷（只有"校园战争"规则会出现） */
 export function baseFallen(g: Game, col: number): boolean {

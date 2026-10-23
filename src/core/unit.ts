@@ -143,8 +143,8 @@ function auto_engage(g: Game, pn: number): boolean {
   return false;
 }
 
-/** 走向指定小格（"校园战争"规则：回到自动迎战前的位置） */
-function walk_to_cell(g: Game, pn: number, cx: number, cy: number): void {
+/** 走向指定小格（"校园战争"规则：回到自动迎战前的位置、整队分散落点） */
+export function walk_to_cell(g: Game, pn: number, cx: number, cy: number): void {
   const p = g.people[pn];
   p.target_pn = -1;
   p.dest_sx = cx;

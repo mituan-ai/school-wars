@@ -116,6 +116,31 @@ body {
   font-size: 14px;
   letter-spacing: 0.2em;
 }
+.rules-line {
+  margin: 0 auto 14px;
+  display: block;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.8);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.rules-line:hover {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.radio-desc {
+  display: block;
+  font-size: 12px;
+  opacity: 0.65;
+  margin-top: 2px;
+}
+
 .cards {
   display: flex;
   gap: 14px;
@@ -329,6 +354,105 @@ body {
 .banner.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+.banner.minor {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.7);
+  top: 30%;
+}
+.hud-left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: auto;
+}
+/* 势力比例条：与"众矢之的"同口径，竖线是 40% */
+.power {
+  position: relative;
+  display: flex;
+  height: 7px;
+  max-width: 420px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(8, 12, 24, 0.78);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+.power > div {
+  height: 100%;
+  transition: width 0.6s;
+}
+.power .top {
+  animation: blink 0.9s steps(2) infinite;
+}
+.power .line {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: #ff5a4a;
+  box-shadow: 0 0 4px #ff5a4a;
+}
+.power .line.off {
+  background: rgba(255, 255, 255, 0.3);
+  box-shadow: none;
+}
+@keyframes blink {
+  50% {
+    filter: brightness(1.6);
+  }
+}
+.alerts {
+  position: absolute;
+  top: 74px;
+  left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.alert {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 216, 74, 0.7);
+  background: rgba(60, 44, 6, 0.88);
+  cursor: pointer;
+  animation: alert-in 0.25s ease-out;
+}
+.alert.urgent {
+  border-color: rgba(255, 90, 74, 0.9);
+  background: rgba(80, 14, 10, 0.9);
+}
+.alert:hover {
+  filter: brightness(1.2);
+}
+@keyframes alert-in {
+  from {
+    transform: translateX(-16px);
+    opacity: 0;
+  }
+}
+.tooltip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(8, 12, 24, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: nowrap;
+  z-index: 5;
+}
+.tooltip.hidden {
+  display: none;
 }
 .tips {
   position: absolute;

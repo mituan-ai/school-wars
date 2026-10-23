@@ -3,7 +3,7 @@ import { createGame } from './core/mapgen.ts';
 import { randomSeed } from './core/rng.ts';
 import type { Game } from './core/types.ts';
 import { setLang } from './i18n/index.ts';
-import { settings } from './settings.ts';
+import { newGameRules, settings } from './settings.ts';
 import { GameScreen } from './ui/game-screen.ts';
 import { TitleScreen } from './ui/title-screen.ts';
 
@@ -14,7 +14,10 @@ let current: { destroy(): void } | null = null;
 
 function showTitle(): void {
   current?.destroy();
-  const title = new TitleScreen({ onPick: (col) => startGame(createGame({ seed: randomSeed(), userCol: col })), onLoad: startGame });
+  const title = new TitleScreen({
+    onPick: (col) => startGame(createGame({ seed: randomSeed(), userCol: col, rules: newGameRules() })),
+    onLoad: startGame,
+  });
   title.mount(app);
   current = title;
 }
@@ -24,7 +27,8 @@ function startGame(g: Game): void {
   const screen: GameScreen = new GameScreen(g, {
     onQuit: showTitle,
     onLoad: startGame,
-    onRestart: (sameMap) => startGame(createGame({ seed: sameMap ? g.seed : randomSeed(), userCol: g.user_col })),
+    // 再来一局沿用这局的规则；想换规则就回标题改设置
+    onRestart: (sameMap) => startGame(createGame({ seed: sameMap ? g.seed : randomSeed(), userCol: g.user_col, rules: g.rules })),
   });
   screen.mount(app);
   current = screen;

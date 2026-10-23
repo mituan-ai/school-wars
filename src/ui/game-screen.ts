@@ -1,10 +1,12 @@
 // 对局画面：固定 18 tick/s 推进模拟，按显示器刷新率插值绘制；处理操作、HUD、菜单
 import { play } from '../audio/sfx.ts';
-import { FPS, PMAX, PS } from '../core/constants.ts';
+import { AREA, CAPTURE_VALUE, FPS, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, TOP_RATIO } from '../core/constants.ts';
 import { step, spadeCount } from '../core/sim.ts';
 import type { Command, Game, GameEvent } from '../core/types.ts';
-import { factionName, formatTime, t } from '../i18n/index.ts';
-import { Camera, minimapToWorld, newFx, newInterp, render, unitPos, type Fx, type MinimapRect, type ViewState } from '../render/renderer.ts';
+import { factionName, formatTime, t, type TextKey } from '../i18n/index.ts';
+import {
+  Camera, hitSchool, minimapToWorld, newFx, newInterp, render, tileCenter, unitPos, type Fx, type MinimapRect, type ViewState,
+} from '../render/renderer.ts';
 import { FACTION } from '../render/palette.ts';
 import { writeSlot } from '../save/storage.ts';
 import { saveSettings, settings } from '../settings.ts';
@@ -13,6 +15,10 @@ import { openSaveLoad, openSettings } from './panels.ts';
 
 const TICK_MS = 1000 / FPS;
 const AUTOSAVE_TICKS = 60 * FPS;
+/** 双击 / 连按的判定间隔 */
+const DOUBLE_MS = 350;
+/** 同一地块的警报至少间隔多久 */
+const ALERT_COOLDOWN = 15_000;
 
 export interface GameScreenHooks {
   onQuit: () => void;
@@ -52,7 +58,16 @@ export class GameScreen {
     selHint: HTMLElement;
     banner: HTMLElement;
     tips: HTMLElement | null;
+    power: HTMLElement;
+    alerts: HTMLElement;
+    tooltip: HTMLElement;
   };
+  private lastGroupKey = { n: -1, t: 0 };
+  private lastClick = { pn: -1, t: 0 };
+  /** 己方各地块上一帧的敌方进度总和、上次报警时间 */
+  private threatSeen = new Map<number, number>();
+  private alertAt = new Map<number, number>();
+  private tipKey = '';
   private bannerTimer = 0;
   private game: Game;
   private hooks: GameScreenHooks;
@@ -69,10 +84,13 @@ export class GameScreen {
     const selHint = h('span', { class: 'sel-hint' });
     const selbar = h('div', { class: 'selbar hidden' }, selText, selHint, h('button', { class: 'btn small', onClick: () => this.cancelSelection(true) }, t('hud.cancel')));
     const banner = h('div', { class: 'banner' });
+    const power = h('div', { class: 'power', title: t('power.tip') });
+    const alerts = h('div', { class: 'alerts' });
+    const tooltip = h('div', { class: 'tooltip hidden' });
     const top = h(
       'div',
       { class: 'hud-top' },
-      h('div', { class: 'chips' }, ...chips),
+      h('div', { class: 'hud-left' }, h('div', { class: 'chips' }, ...chips), power),
       h('div', { class: 'hud-right' }, clock, speed, h('button', { class: 'btn small ghost', title: t('hud.pause'), onClick: () => this.openPause() }, '❚❚')),
     );
     let tips: HTMLElement | null = null;
@@ -81,7 +99,7 @@ export class GameScreen {
         'div',
         { class: 'tips' },
         h('div', { class: 'tips-title' }, t('tips.title')),
-        h('div', { class: 'tips-body' }, t('tips.body')),
+        h('div', { class: 'tips-body' }, t(game.rules.ruleset === 'remake' ? 'tips.body.remake' : 'tips.body')),
         h('button', {
           class: 'btn small',
           onClick: () => {
@@ -92,8 +110,8 @@ export class GameScreen {
         }, t('tips.ok')),
       );
     }
-    this.root = h('div', { class: 'game-screen' }, this.canvas, h('div', { class: 'hud' }, top, selbar, banner, tips));
-    this.hud = { chips, clock, speed, selbar, selText, selHint, banner, tips };
+    this.root = h('div', { class: 'game-screen' }, this.canvas, h('div', { class: 'hud' }, top, alerts, selbar, banner, tips), tooltip);
+    this.hud = { chips, clock, speed, selbar, selText, selHint, banner, tips, power, alerts, tooltip };
     this.updateSpeedLabel();
     this.initCamera();
     this.snapInterp();
@@ -173,6 +191,7 @@ export class GameScreen {
     }
     this.ip.alpha = Math.min(1, this.acc / TICK_MS);
     this.updateHover();
+    this.updateTooltip();
     const out = render(this.ctx, this.game, this.cam, this.ip, this.view, this.fx, now, this.dpr);
     this.mm = out.mm;
     this.updateHud();
@@ -192,6 +211,44 @@ export class GameScreen {
     // 已死亡单位从选择中移除
     for (const pn of this.view.selected) if (g.people[pn].stat <= PS.DEAD) this.view.selected.delete(pn);
     if (g.tick - this.lastAutosave >= AUTOSAVE_TICKS) this.autosave();
+    if (g.tick % 9 === 0) this.checkThreats(now);
+  }
+
+  /** 己方地块的敌方占领进度在增长 → 屏幕边缘提示，小地图闪烁 */
+  private checkThreats(now: number): void {
+    const g = this.game;
+    const me = g.user_col;
+    if (me >= 4 || g.rules.ruleset !== 'remake' || !g.player[me].exist) return;
+    g.area.forEach((a, n) => {
+      if (a.col !== me) return;
+      let enemy = 0;
+      for (let c = 0; c < 4; c++) if (c !== me) enemy += a.val[c];
+      const before = this.threatSeen.get(n) ?? 0;
+      this.threatSeen.set(n, enemy);
+      if (enemy <= before || a.fallen) return;
+      if (now - (this.alertAt.get(n) ?? -Infinity) < ALERT_COOLDOWN) return;
+      this.alertAt.set(n, now);
+      const key: TextKey = a.areatype === AREA.BASE ? 'alert.base' : a.areatype === AREA.SPADE ? 'alert.spade' : 'alert.heart';
+      this.pushAlert(t(key), a.bx, a.by, now, a.areatype === AREA.BASE);
+    });
+  }
+
+  private pushAlert(text: string, bx: number, by: number, now: number, urgent: boolean): void {
+    this.fx.pings.push({ bx, by, t0: now, color: urgent ? '#ff5a4a' : '#ffd84a' });
+    play('message');
+    const el = h('button', {
+      class: `alert${urgent ? ' urgent' : ''}`,
+      onClick: () => {
+        const [x, y] = tileCenter(bx, by);
+        this.cam.x = x;
+        this.cam.y = y;
+        this.cam.clamp();
+        el.remove();
+      },
+    }, text);
+    this.hud.alerts.prepend(el);
+    while (this.hud.alerts.childElementCount > 4) this.hud.alerts.lastElementChild?.remove();
+    window.setTimeout(() => el.remove(), 7000);
   }
 
   private onEvent(e: GameEvent, now: number): void {
@@ -203,11 +260,34 @@ export class GameScreen {
         break;
       case 'punch':
         this.fx.impacts.push({ x: e.px, y: e.py, t0: now, big: false });
+        this.fx.hitAt[e.pn] = now;
         if (this.cam.inside(e.px, e.py)) play('punch');
+        break;
+      case 'miss':
+        this.fx.texts.push({ x: e.px, y: e.py, t0: now, text: t('msg.miss') });
         break;
       case 'dead':
         this.fx.impacts.push({ x: e.px, y: e.py, t0: now, big: true });
+        this.fx.hitAt[e.pn] = now;
+        this.fx.kos.push({ x: e.px, y: e.py, t0: now });
         if (this.cam.inside(e.px, e.py)) play('dead');
+        break;
+      case 'capture':
+        this.fx.raised.set(e.area, now);
+        break;
+      case 'fallen': {
+        const a = g.area[e.area];
+        if (e.col === g.user_col) {
+          this.showBanner(t('msg.fallen.you'), false);
+          this.pushAlert(t('alert.fallen'), a.bx, a.by, now, true);
+        } else {
+          this.showBanner(t('msg.fallen', { name: factionName(e.col), by: factionName(e.by) }), false);
+          this.fx.pings.push({ bx: a.bx, by: a.by, t0: now, color: '#ffffff' });
+        }
+        break;
+      }
+      case 'recovered':
+        this.showBanner(t('msg.recovered', { name: factionName(e.col) }), false);
         break;
       case 'levelup':
         this.fx.levelups.push({ pn: e.pn, t0: now });
@@ -353,8 +433,60 @@ export class GameScreen {
   }
 
   private cancelSelection(withSound: boolean): void {
-    if (withSound && this.view.selected.size) play('cancel');
+    if (withSound && (this.view.selected.size || this.view.baseSelected)) play('cancel');
     this.view.selected.clear();
+    this.view.baseSelected = false;
+  }
+
+  /** 只有"校园战争"规则有集结点 */
+  private isOwnBase(tile: { bx: number; by: number }): boolean {
+    const g = this.game;
+    const pl = g.player[g.user_col];
+    return g.rules.ruleset === 'remake' && !!pl && pl.exist && tile.bx === pl.basex && tile.by === pl.basey;
+  }
+
+  private setRally(sx: number, sy: number): void {
+    const [wx, wy] = this.cam.toWorld(sx, sy);
+    const tile = this.tileAt(wx, wy);
+    if (tile.bx < 0 || tile.by < 0 || tile.bx >= 16 || tile.by >= 16) return;
+    const clear = this.isOwnBase(tile);
+    this.pending.push({ type: 'rally', bx: clear ? -1 : tile.bx, by: clear ? -1 : tile.by });
+    if (!clear) this.fx.blink = { bx: tile.bx, by: tile.by, pn: -1, t0: performance.now() };
+    play(clear ? 'cancel' : 'move');
+    this.showBanner(t(clear ? 'hud.rally.clear' : 'hud.rally.set'), false, true);
+  }
+
+  /** 编队：Ctrl/Shift + 数字保存，数字选中，连按两次镜头跳过去 */
+  private groupKey(n: number, assign: boolean): void {
+    const g = this.game;
+    if (g.user_col >= 4) return;
+    if (assign) {
+      g.groups[n] = [...this.view.selected].map((pn) => g.people[pn].uid);
+      this.showBanner(t('hud.group.saved', { n, m: g.groups[n].length }), false, true);
+      return;
+    }
+    const uids = new Set(g.groups[n] ?? []);
+    const sel = new Set<number>();
+    for (let i = 0; i < PMAX; i++) {
+      const p = g.people[i];
+      if (p.stat > PS.DEAD && p.col === g.user_col && uids.has(p.uid)) sel.add(i);
+    }
+    const now = performance.now();
+    if (this.lastGroupKey.n === n && now - this.lastGroupKey.t < DOUBLE_MS && sel.size) {
+      let sx = 0;
+      let sy = 0;
+      for (const pn of sel) {
+        sx += g.people[pn].px;
+        sy += g.people[pn].py;
+      }
+      this.cam.x = sx / sel.size;
+      this.cam.y = sy / sel.size;
+      this.cam.clamp();
+    }
+    this.lastGroupKey = { n, t: now };
+    this.view.selected = sel;
+    this.view.baseSelected = false;
+    if (sel.size) play('select');
   }
 
   private selectAll(): void {
@@ -367,10 +499,36 @@ export class GameScreen {
   private finishSelect(x1: number, y1: number, x2: number, y2: number): void {
     const g = this.game;
     const sel = new Set<number>();
+    this.view.baseSelected = false;
     if (Math.abs(x2 - x1) < 4 && Math.abs(y2 - y1) < 4) {
       const [wx, wy] = this.cam.toWorld(x2, y2);
       const pn = this.pointedUnit(wx, wy, true);
-      if (pn >= 0 && g.people[pn].col === g.user_col) sel.add(pn);
+      const now = performance.now();
+      const pl = g.player[g.user_col];
+      if (pl && this.isOwnBase({ bx: pl.basex, by: pl.basey }) && hitSchool(pl.basex, pl.basey, wx, wy)) {
+        // 点校舍选中本部
+        this.view.baseSelected = true;
+        this.view.selected = sel;
+        play('select');
+        return;
+      }
+      if (pn >= 0 && g.people[pn].col === g.user_col) {
+        if (this.lastClick.pn === pn && now - this.lastClick.t < DOUBLE_MS) {
+          // 双击：选中屏幕内全部己方学生
+          for (let i = 0; i < PMAX; i++) {
+            const p = g.people[i];
+            if (p.stat > PS.DEAD && p.col === g.user_col && this.cam.inside(...unitPos(g, this.ip, i))) sel.add(i);
+          }
+        } else {
+          sel.add(pn);
+        }
+        this.lastClick = { pn, t: now };
+      } else if (pn < 0 && this.isOwnBase(this.tileAt(wx, wy))) {
+        this.view.baseSelected = true;
+        this.view.selected = sel;
+        play('select');
+        return;
+      }
     } else {
       // 原版框选判定：框向左右各扩 12、向上扩 12、向下扩 32（862/f5:211-214）
       const [ax, ay] = this.cam.toWorld(Math.min(x1, x2), Math.min(y1, y2));
@@ -405,6 +563,7 @@ export class GameScreen {
     const y = e.offsetY;
     if (e.button === 2) {
       if (this.view.selected.size) this.issueOrder(x, y);
+      else if (this.view.baseSelected) this.setRally(x, y);
       return;
     }
     if (e.button === 1) {
@@ -463,8 +622,14 @@ export class GameScreen {
       this.selectAll();
       return;
     }
+    const digit = /^Digit(\d)$/.exec(e.code);
+    if (digit) {
+      e.preventDefault();
+      this.groupKey(Number(digit[1]), e.ctrlKey || e.metaKey || e.shiftKey);
+      return;
+    }
     if (k === 'escape') {
-      if (this.view.selected.size) this.cancelSelection(true);
+      if (this.view.selected.size || this.view.baseSelected) this.cancelSelection(true);
       else this.openPause();
       return;
     }
@@ -514,7 +679,7 @@ export class GameScreen {
     for (let c = 0; c < 4; c++) {
       parts.push(`${g.player[c].exist}|${g.player[c].people_cnt}|${spadeCount(g, c)}|${g.top === c}`);
     }
-    const key = parts.join(',') + `|${this.view.selected.size}|${settings.controls}|${Math.floor(g.tick / FPS)}|${settings.lang}`;
+    const key = parts.join(',') + `|${this.view.selected.size}|${this.view.baseSelected}|${settings.controls}|${Math.floor(g.tick / FPS)}|${settings.lang}`;
     if (key === this.hudCache) return;
     this.hudCache = key;
     for (let c = 0; c < 4; c++) {
@@ -522,7 +687,7 @@ export class GameScreen {
       const chip = this.hud.chips[c];
       chip.className = `chip${c === g.user_col ? ' you' : ''}${pl.exist ? '' : ' out'}${g.top === c ? ' top' : ''}`;
       chip.style.setProperty('--fc', FACTION[c].ui);
-      chip.title = g.top === c ? t('hud.top.tip', { name: factionName(c) }) : '';
+      chip.title = g.top === c ? t(g.rules.ruleset === 'remake' ? 'hud.top.tip.remake' : 'hud.top.tip', { name: factionName(c) }) : '';
       const parts: (HTMLElement | null)[] = [
         h('span', { class: 'dot' }),
         h('span', { class: 'name' }, factionName(c, true)),
@@ -535,18 +700,92 @@ export class GameScreen {
     }
     this.hud.clock.textContent = g.user_col >= 4 ? `${t('hud.watching')} ${formatTime(g.tick)}` : formatTime(g.tick);
     const n = this.view.selected.size;
-    this.hud.selbar.classList.toggle('hidden', n === 0);
-    this.hud.selText.textContent = t('hud.selected', { n });
-    this.hud.selHint.textContent = settings.controls === 'classic' ? t('hud.hint.classic') : t('hud.hint.modern');
+    const base = !!this.view.baseSelected;
+    this.hud.selbar.classList.toggle('hidden', n === 0 && !base);
+    this.hud.selText.textContent = base ? t('hud.base.selected') : t('hud.selected', { n });
+    this.hud.selHint.textContent = base ? t('hud.base.hint') : settings.controls === 'classic' ? t('hud.hint.classic') : t('hud.hint.modern');
+    this.updatePower();
   }
 
-  private showBanner(text: string, persistent: boolean): void {
-    play('message');
+  /** 势力比例条：与"众矢之的"的判定口径相同（人数 + ♠，绿林减半），标出 40% 线 */
+  private updatePower(): void {
+    const g = this.game;
+    const v = [0, 0, 0, 0];
+    for (let c = 0; c < 4; c++) v[c] = g.player[c].people_cnt;
+    for (const a of g.area) if (a.areatype === AREA.SPADE && a.col >= 0 && g.player[a.col].exist) v[a.col]++;
+    v[1] /= 2;
+    const sum = v.reduce((x, y) => x + y, 0) || 1;
+    const alive = g.player.filter((p) => p.exist).length;
+    const active = g.rules.ruleset === 'classic' || alive >= 3;
+    const segs = v.map((x, c) =>
+      h('div', { class: `seg-${c}${g.top === c ? ' top' : ''}`, style: `width:${(100 * x) / sum}%;background:${FACTION[c].ui}` }),
+    );
+    this.hud.power.replaceChildren(
+      ...segs,
+      h('div', { class: `line${active ? '' : ' off'}`, style: `left:${TOP_RATIO * 100}%` }),
+    );
+  }
+
+  /** 悬停信息：学生的生命与击倒数；地块的作用与占领进度 */
+  private updateTooltip(): void {
+    const tip = this.hud.tooltip;
+    const g = this.game;
+    let lines: string[] = [];
+    if (this.mouse.inside && !this.drag && !this.menuOpen && !this.inMinimap(this.mouse.x, this.mouse.y)) {
+      const [wx, wy] = this.cam.toWorld(this.mouse.x, this.mouse.y);
+      const pn = this.pointedUnit(wx, wy, true);
+      if (pn >= 0) {
+        const p = g.people[pn];
+        lines = [t('hover.unit', { name: factionName(p.col, true), hp: Math.ceil(p.hp), mhp: p.mhp, kills: p.lev })];
+      } else {
+        const { bx, by } = this.tileAt(wx, wy);
+        const n = bx >= 0 && by >= 0 && bx < 16 && by < 16 ? g.bmap_n[by * 16 + bx] : -1;
+        if (n >= 0) lines = this.areaLines(n);
+      }
+    }
+    const key = lines.join('\n');
+    if (key !== this.tipKey) {
+      this.tipKey = key;
+      tip.replaceChildren(...lines.map((l) => h('div', {}, l)));
+      tip.classList.toggle('hidden', lines.length === 0);
+    }
+    if (lines.length) tip.style.transform = `translate(${this.mouse.x + 16}px, ${this.mouse.y + 18}px)`;
+  }
+
+  private areaLines(n: number): string[] {
+    const g = this.game;
+    const a = g.area[n];
+    const lines: string[] = [];
+    const pct = (v: number, need: number) => Math.min(99, Math.floor((100 * v) / need));
+    if (a.areatype === AREA.BASE) {
+      if (a.fallen) lines.push(t('hover.base.fallen', { name: factionName(a.col, true), by: a.holder >= 0 ? factionName(a.holder, true) : '?' }));
+      else lines.push(t('hover.base', { name: factionName(a.col, true) }));
+      if (g.rules.ruleset === 'remake') {
+        for (let c = 0; c < 4; c++) {
+          if (a.val[c] <= 0) continue;
+          if (a.fallen && c === a.col) lines.push(t('hover.recover', { pct: pct(a.val[c], RECOVER_VALUE) }));
+          else if (!a.fallen && c !== a.col) lines.push(t('hover.siege', { name: factionName(c, true), pct: pct(a.val[c], SIEGE_VALUE) }));
+        }
+      }
+      return lines;
+    }
+    lines.push(t(a.areatype === AREA.SPADE ? 'hover.spade' : 'hover.heart'));
+    lines.push(a.col >= 0 ? t('hover.owner', { name: factionName(a.col, true) }) : t('hover.neutral'));
+    for (let c = 0; c < 4; c++) {
+      if (c !== a.col && a.val[c] > 0) lines.push(t('hover.progress', { name: factionName(c, true), pct: pct(a.val[c], CAPTURE_VALUE) }));
+    }
+    return lines;
+  }
+
+  /** minor：操作回执之类的小提示，字小、不响 */
+  private showBanner(text: string, persistent: boolean, minor = false): void {
+    if (!minor) play('message');
     const b = this.hud.banner;
     b.textContent = text;
+    b.classList.toggle('minor', minor);
     b.classList.add('show');
     clearTimeout(this.bannerTimer);
-    if (!persistent) this.bannerTimer = window.setTimeout(() => b.classList.remove('show'), 5000);
+    if (!persistent) this.bannerTimer = window.setTimeout(() => b.classList.remove('show'), minor ? 1600 : 5000);
   }
 
   private openPause(): void {

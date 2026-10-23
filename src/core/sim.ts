@@ -1,9 +1,10 @@
 // 主循环 ← 862/f5:70-75（onEnterFrame：people_action → com_orders → check_add_people）
-import { PMAX, PS } from './constants.ts';
+import { ADDX, ADDY, BSIZE, PMAX, PS, SSIZE } from './constants.ts';
 import { com_orders } from './ai-classic.ts';
 import { commander } from './ai-commander.ts';
 import { check_add_people } from './spawn.ts';
-import { decay_areas, people_action, start_walk } from './unit.ts';
+import { random } from './rng.ts';
+import { decay_areas, people_action, start_walk, walk_to_cell } from './unit.ts';
 import type { Command, Game, GameEvent } from './types.ts';
 
 /**
@@ -37,18 +38,46 @@ export function applyCommand(g: Game, c: Command): void {
   const col = c.col ?? g.user_col;
   const remake = g.rules.ruleset === 'remake';
   const picked = new Set(c.units);
+  const units: number[] = [];
   for (let i = 0; i < PMAX; i++) {
     if (!picked.has(i)) continue;
     const p = g.people[i];
-    if (p.stat > PS.DEAD && p.col === col) {
-      if (remake) {
-        p.ordered = true;
-        p.leash = false;
-        p.retaliate = -1;
-      }
-      start_walk(g, i, c.bx, c.by, c.target);
-    }
+    if (p.stat > PS.DEAD && p.col === col) units.push(i);
   }
+  // "校园战争"规则：多人前往同一格时各占一个小格，人多就溢出到相邻格
+  const cells = remake && c.target < 0 && units.length > 1 ? spreadCells(g, c.bx, c.by, units.length) : null;
+  units.forEach((i, k) => {
+    const p = g.people[i];
+    if (remake) {
+      p.ordered = true;
+      p.leash = false;
+      p.retaliate = -1;
+    }
+    if (cells) walk_to_cell(g, i, cells[k][0], cells[k][1]);
+    else start_walk(g, i, c.bx, c.by, c.target);
+  });
+}
+
+/** 大格 (bx, by) 内的 16 个小格随机排列；不够时依次加入四邻、斜邻大格的小格 */
+function spreadCells(g: Game, bx: number, by: number, n: number): [number, number][] {
+  const out: [number, number][] = [];
+  const tiles: [number, number][] = [[bx, by]];
+  for (let d = 0; d < 4; d++) tiles.push([bx + ADDX[d], by + ADDY[d]]);
+  for (const [dx, dy] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) tiles.push([bx + dx, by + dy]);
+  for (const [tx, ty] of tiles) {
+    if (out.length >= n) break;
+    if (tx < 0 || ty < 0 || tx >= BSIZE || ty >= BSIZE) continue;
+    const cells: [number, number][] = [];
+    for (let j = 0; j < 16; j++) cells.push([tx * 4 + (j % 4), ty * 4 + Math.floor(j / 4)]);
+    for (let j = cells.length - 1; j > 0; j--) {
+      const r = Math.floor(random(g.rng) * (j + 1));
+      [cells[j], cells[r]] = [cells[r], cells[j]];
+    }
+    // 先去空着的小格
+    cells.sort((a, b) => Number(g.smap[a[1] * SSIZE + a[0]] >= 0) - Number(g.smap[b[1] * SSIZE + b[0]] >= 0));
+    out.push(...cells);
+  }
+  return out.slice(0, n);
 }
 
 /** 某阵营的 ♠ 持有数 */

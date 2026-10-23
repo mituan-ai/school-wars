@@ -1,8 +1,14 @@
-// 体验设置：只影响操作和显示，不改变规则
+// 体验设置。规则与难度只对新开的对局生效，其余只影响操作和显示。
+import { CLASSIC_RULES, remakeRules, type Rules, type RuleSet } from './core/types.ts';
 import type { Lang } from './i18n/index.ts';
+
+export type Difficulty = 'easy' | 'normal' | 'hard';
 
 export interface Settings {
   lang: Lang;
+  ruleset: RuleSet;
+  difficulty: Difficulty;
+  colorblind: boolean;
   controls: 'modern' | 'classic';
   volume: number;
   showCapture: boolean;
@@ -15,6 +21,9 @@ const KEY = 'schoolwars.settings';
 
 const defaults: Settings = {
   lang: 'zh',
+  ruleset: 'remake',
+  difficulty: 'normal',
+  colorblind: false,
   controls: 'modern',
   volume: 0.6,
   showCapture: true,
@@ -33,6 +42,11 @@ function load(): Settings {
     // 隐私模式或存储被禁用时使用默认值
   }
   return { ...defaults };
+}
+
+/** 新对局使用的规则 */
+export function newGameRules(): Rules {
+  return settings.ruleset === 'classic' ? structuredClone(CLASSIC_RULES) : remakeRules(settings.difficulty);
 }
 
 export function saveSettings(): void {

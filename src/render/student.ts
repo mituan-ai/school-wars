@@ -150,8 +150,16 @@ function circle(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, 
   }
 }
 
-/** 画一个学生。(x, y) 是脚下位置。 */
-export function drawStudent(ctx: CanvasRenderingContext2D, x: number, y: number, col: number, dir: number, pat: number): void {
+/** 体型反映属性：金刚壮、紫电精瘦、绿林矮小 */
+const BODY: [number, number][] = [
+  [1, 1],
+  [0.9, 0.9],
+  [1.13, 1.05],
+  [0.9, 1.05],
+];
+
+/** 画一个学生。(x, y) 是脚下位置；flash 为受击闪白强度 0–1 */
+export function drawStudent(ctx: CanvasRenderingContext2D, x: number, y: number, col: number, dir: number, pat: number, flash = 0): void {
   const c = FACTION[col] ?? FACTION[0];
   const ps = pose(pat);
   const back = dir === 2 || dir === 3;
@@ -159,6 +167,9 @@ export function drawStudent(ctx: CanvasRenderingContext2D, x: number, y: number,
 
   ctx.save();
   ctx.translate(x, y);
+  const [sx, sy] = BODY[col] ?? BODY[0];
+  ctx.scale(sx, sy);
+  if (flash > 0) ctx.filter = `brightness(${1 + flash * 1.6})`;
 
   // 影子（不随身体旋转）
   ctx.globalAlpha = 0.28 * ps.alpha;

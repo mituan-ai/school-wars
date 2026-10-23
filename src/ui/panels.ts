@@ -2,7 +2,7 @@
 import type { Game } from '../core/types.ts';
 import { factionName, formatTime, getLang, setLang, t } from '../i18n/index.ts';
 import { exportFile, importFile, readSlot, slotMeta, SLOTS, writeSlot, type SlotId } from '../save/storage.ts';
-import { saveSettings, settings } from '../settings.ts';
+import { saveSettings, settings, type Difficulty } from '../settings.ts';
 import { h, modal } from './dom.ts';
 
 function slotLabel(id: SlotId): string {
@@ -114,6 +114,31 @@ export function openSettings(onChange: () => void, onClose?: () => void): void {
           render();
         },
       }, label);
+    const rulesBtn = (rs: 'remake' | 'classic') =>
+      h('label', { class: 'radio-row' },
+        h('input', {
+          type: 'radio',
+          name: 'ruleset',
+          checked: settings.ruleset === rs,
+          onChange: () => {
+            settings.ruleset = rs;
+            saveSettings();
+            onChange();
+            render();
+          },
+        }),
+        h('span', {}, h('b', {}, t(`rules.${rs}`)), h('span', { class: 'radio-desc' }, t(`rules.${rs}.desc`))));
+    const diffBtn = (d: Difficulty) =>
+      h('button', {
+        class: `btn small ${settings.difficulty === d ? 'active' : 'ghost'}`,
+        disabled: settings.ruleset === 'classic',
+        onClick: () => {
+          settings.difficulty = d;
+          saveSettings();
+          onChange();
+          render();
+        },
+      }, t(`difficulty.${d}`));
     const ctrlBtn = (mode: 'modern' | 'classic') =>
       h('label', { class: 'radio-row' },
         h('input', {
@@ -130,11 +155,14 @@ export function openSettings(onChange: () => void, onClose?: () => void): void {
     body.replaceChildren(
       h('h2', {}, t('settings.title')),
       h('div', { class: 'setting-row' }, h('span', {}, t('settings.lang')), h('div', { class: 'seg' }, langBtn('zh', '中文'), langBtn('en', 'English'))),
+      h('div', { class: 'setting-block' }, h('div', { class: 'setting-label' }, t('settings.rules')), rulesBtn('remake'), rulesBtn('classic')),
+      h('div', { class: 'setting-row' }, h('span', {}, t('settings.difficulty')), h('div', { class: 'seg' }, diffBtn('easy'), diffBtn('normal'), diffBtn('hard'))),
       h('div', { class: 'setting-block' }, h('div', { class: 'setting-label' }, t('settings.controls')), ctrlBtn('modern'), ctrlBtn('classic')),
       h('label', { class: 'setting-row' }, h('span', {}, t('settings.volume')), vol),
       toggle(t('settings.capture'), () => settings.showCapture, (v) => (settings.showCapture = v)),
       toggle(t('settings.spawn'), () => settings.showSpawn, (v) => (settings.showSpawn = v)),
       toggle(t('settings.edge'), () => settings.edgeScroll, (v) => (settings.edgeScroll = v)),
+      toggle(t('settings.colorblind'), () => settings.colorblind, (v) => (settings.colorblind = v)),
       h('div', { class: 'panel-actions' }, h('button', { class: 'btn', onClick: () => close() }, t('menu.back'))),
     );
   };

@@ -1,14 +1,16 @@
 // 标题画面：背景是一局实时进行的四 AI 观战局
-import { FPS, SPEC_APPEAR, SPEC_HP, SPEC_PUNCH, WATCH_COL } from '../core/constants.ts';
+import { FPS, WATCH_COL } from '../core/constants.ts';
 import { createGame } from '../core/mapgen.ts';
+import { factionSpec } from '../core/query.ts';
 import { randomSeed } from '../core/rng.ts';
 import { step } from '../core/sim.ts';
-import type { Game } from '../core/types.ts';
+import { remakeRules, type Game } from '../core/types.ts';
 import { factionName, t, type TextKey } from '../i18n/index.ts';
 import { Camera, newFx, newInterp, render } from '../render/renderer.ts';
 import { FACTION } from '../render/palette.ts';
 import { drawStudent } from '../render/student.ts';
 import { readSlot, slotMeta } from '../save/storage.ts';
+import { settings } from '../settings.ts';
 import { h } from './dom.ts';
 import { openSaveLoad, openSettings } from './panels.ts';
 
@@ -21,7 +23,7 @@ export class TitleScreen {
   readonly root: HTMLElement;
   private canvas = h('canvas', { class: 'game-canvas' });
   private ctx = this.canvas.getContext('2d')!;
-  private game = createGame({ seed: randomSeed(), userCol: WATCH_COL });
+  private game = TitleScreen.attract();
   private cam = new Camera();
   private ip = newInterp();
   private fx = newFx();
@@ -37,6 +39,11 @@ export class TitleScreen {
     this.hooks = hooks;
     this.root = h('div', { class: 'title-screen' }, this.canvas, h('div', { class: 'title-shade' }), this.panel);
     this.build();
+  }
+
+  /** 背景观战局：新规则、困难电脑，节奏明快 */
+  private static attract(): Game {
+    return createGame({ seed: randomSeed(), userCol: WATCH_COL, rules: remakeRules('hard') });
   }
 
   mount(parent: HTMLElement): void {
@@ -59,7 +66,8 @@ export class TitleScreen {
       const pc = h('canvas', { class: 'portrait', width: 168, height: 168 });
       const entry = { canvas: pc, col, hover: false };
       this.portraits.push(entry);
-      const fast = SPEC_APPEAR[col] < 1000;
+      const spec = factionSpec(settings.ruleset, col);
+      const fast = spec.appear < 1000;
       return h(
         'button',
         {
@@ -75,8 +83,8 @@ export class TitleScreen {
         h(
           'div',
           { class: 'card-stats' },
-          h('span', {}, `${t('stat.hp')} ${SPEC_HP[col]}`),
-          h('span', {}, `${t('stat.atk')} ${SPEC_PUNCH[col]}`),
+          h('span', {}, `${t('stat.hp')} ${spec.hp}`),
+          h('span', {}, `${t('stat.atk')} ${spec.punch}`),
           h('span', { class: fast ? 'fast' : '' }, `${t('stat.spawn')} ${fast ? t('stat.spawn.fast') : t('stat.spawn.slow')}`),
         ),
       );
@@ -87,6 +95,10 @@ export class TitleScreen {
       h('h1', { class: 'logo' }, t('game.title')),
       h('div', { class: 'logo-sub' }, t('game.subtitle')),
       h('div', { class: 'pick-label' }, t('title.pick')),
+      h('button', { class: 'rules-line', onClick: () => openSettings(() => this.build()) },
+        settings.ruleset === 'classic'
+          ? t('title.rules.classic')
+          : t('title.rules', { rules: t('rules.remake'), difficulty: t(`difficulty.${settings.difficulty}`) })),
       h('div', { class: 'cards' }, ...cards),
       h(
         'div',
@@ -138,7 +150,7 @@ export class TitleScreen {
         }
       }
       if (g.player.filter((p) => p.exist).length <= 1 || g.tick > 20 * 60 * FPS) {
-        this.game = createGame({ seed: randomSeed(), userCol: WATCH_COL });
+        this.game = TitleScreen.attract();
       }
     }
     this.ip.alpha = this.acc / (1000 / FPS);

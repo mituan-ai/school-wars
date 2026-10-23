@@ -260,6 +260,26 @@ describe('集结点', () => {
   });
 });
 
+describe('多人移动', () => {
+  it('一群人走向同一格时分散落点，不挤成一团', () => {
+    const g = blankGame(1, 0, R);
+    const units = [0, 1, 2, 3, 4, 5];
+    units.forEach((pn, k) => place(g, pn, 0, 4 + k, 8));
+    applyCommand(g, { type: 'order', units, bx: 9, by: 9, target: -1 });
+    for (let t = 0; t < 1500; t++) {
+      people_action(g);
+      g.tick++;
+    }
+    const cells = new Set(units.map((pn) => g.people[pn].cy * SSIZE + g.people[pn].cx));
+    expect(cells.size).toBe(units.length);
+    for (const pn of units) {
+      expect(Math.abs(Math.floor(g.people[pn].cx / 4) - 9)).toBeLessThanOrEqual(1);
+      expect(Math.abs(Math.floor(g.people[pn].cy / 4) - 9)).toBeLessThanOrEqual(1);
+    }
+    expect(checkInvariants(g)).toEqual([]);
+  });
+});
+
 describe('整局（新规则）', () => {
   it('40 局 × 4000 帧，不变量始终成立', () => {
     for (let seed = 1; seed <= 40; seed++) {

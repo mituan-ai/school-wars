@@ -29,6 +29,7 @@ body {
   position: absolute;
   inset: 0;
   display: block;
+  background: linear-gradient(180deg, #04060d 0%, #0b2558 55%, #1d56b8 100%);
 }
 
 /* ---------- 按钮 ---------- */

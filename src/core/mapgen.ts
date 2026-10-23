@@ -2,7 +2,7 @@
 import { AREA, BSIZE, INITIAL_PEOPLE, PMAX, SSIZE, ADDX, ADDY, mappat } from './constants.ts';
 import { createRng, random } from './rng.ts';
 import { add_people } from './spawn.ts';
-import { CLASSIC_RULES, type Game, type Person, type Rules } from './types.ts';
+import { CLASSIC_RULES, type Area, type Game, type Person, type Player, type Rules } from './types.ts';
 
 export function emptyPerson(): Person {
   return {
@@ -10,7 +10,16 @@ export function emptyPerson(): Person {
     hp: 0, mhp: 0, punch: 0, lev: 0, fs: 0, target_pn: -1, dest_sx: 0, dest_sy: 0,
     hx: [], hy: [], hc: 0, bx: 0, by: 0, area_num: -1,
     donothing: NaN,
+    uid: -1, ordered: false, leash: false, anchor_x: 0, anchor_y: 0, retaliate: -1, task: 0, task_area: -1,
   };
+}
+
+export function newArea(bx: number, by: number, areatype: number, col: number): Area {
+  return { bx, by, areatype, col, val: [0, 0, 0, 0], touch: [0, 0, 0, 0], fallen: false, holder: -1 };
+}
+
+export function newPlayer(exist: boolean, basex: number, basey: number): Player {
+  return { exist, basex, basey, people_cnt: 0, appear_cnt: 0, rally_bx: -1, rally_by: -1 };
 }
 
 export interface NewGameOptions {
@@ -65,20 +74,20 @@ export function createGame(opts: NewGameOptions): Game {
       if (p !== 0) {
         const mp = mappat(p);
         bmap_n[i * BSIZE + j] = area.length;
-        area.push({ bx: j, by: i, areatype: mp.areatype, col: mp.col, val: [0, 0, 0, 0] });
+        area.push(newArea(j, i, mp.areatype, mp.col));
       }
     }
   }
 
   const player: Game['player'] = [];
   for (let i = 0; i < 4; i++) {
-    player.push({ exist: false, basex: 0, basey: 0, people_cnt: 0, appear_cnt: 0 });
+    player.push(newPlayer(false, 0, 0));
   }
   for (let i = 0; i < BSIZE; i++) {
     for (let j = 0; j < BSIZE; j++) {
       const mp = mappat(bmap_pat[i * BSIZE + j]);
       if (mp.areatype === AREA.BASE) {
-        player[mp.col] = { exist: true, basex: j, basey: i, people_cnt: 0, appear_cnt: 0 };
+        player[mp.col] = newPlayer(true, j, i);
       }
     }
   }
@@ -90,7 +99,7 @@ export function createGame(opts: NewGameOptions): Game {
     seed: opts.seed,
     rng,
     tick: 0,
-    rules: opts.rules ?? CLASSIC_RULES,
+    rules: structuredClone(opts.rules ?? CLASSIC_RULES),
     user_col: opts.userCol,
     bmap_pat,
     bmap_n,
@@ -100,6 +109,8 @@ export function createGame(opts: NewGameOptions): Game {
     people,
     top: -1,
     pn_com: 0,
+    next_uid: 0,
+    groups: Array.from({ length: 10 }, () => []),
     kills: [0, 0, 0, 0],
     result: 'playing',
     events: [],

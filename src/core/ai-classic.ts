@@ -1,5 +1,6 @@
 // 原版电脑 AI ← 862/f4（每帧只检查一个槽位）
 import { AI_IDLE_TICKS, AREA, PMAX, PS } from './constants.ts';
+import { topBlocks } from './query.ts';
 import { random } from './rng.ts';
 import { start_walk } from './unit.ts';
 import type { Game } from './types.ts';
@@ -10,6 +11,8 @@ export function com_orders(g: Game): void {
   const pn = g.pn_com;
   const p = g.people[pn];
   if (p.col === g.user_col) return;
+  // 指定了其他 AI 的阵营由指挥官负责（经典规则下四家都是 classic）
+  if (g.rules.ai[p.col] !== 'classic') return;
   if (p.stat !== PS.SIT) return;
   // donothing 为 NaN（新槽位从未站立过）时比较结果为假，会立即行动 —— 与 AS2 语义一致
   if (p.donothing < AI_IDLE_TICKS) return;
@@ -24,7 +27,8 @@ export function com_orders(g: Game): void {
     if (fullHp) {
       if (acol === col) continue;
       if (a.areatype === AREA.BASE && !g.player[acol].exist) continue;
-      if (g.top >= 0 && col !== g.top && acol !== g.top) continue;
+      if (a.fallen) continue;
+      if (topBlocks(g, col, acol)) continue;
     } else if (acol !== col || a.areatype === AREA.SPADE) {
       continue;
     }
@@ -47,7 +51,7 @@ export function com_orders(g: Game): void {
     const o = g.people[i];
     if (o.stat <= PS.DEAD) continue;
     if (o.col === col) continue;
-    if (g.top >= 0 && col !== g.top && o.col !== g.top) continue;
+    if (topBlocks(g, col, o.col)) continue;
     const d = Math.abs(o.cx - p.cx) + Math.abs(o.cy - p.cy) + random(g.rng) * 4;
     if (best > d) {
       best = d;

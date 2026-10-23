@@ -65,3 +65,20 @@ export const AGGRO_RANGE = 10;
 export const AI_IDLE_TICKS = 400;
 /** "领先者"判定阈值（862/f3:680） */
 export const TOP_RATIO = 0.4;
+
+// ---- "校园战争"优化规则（docs/03_优化方案.md）----
+
+/** 攻陷敌方本部所需的累计坐下帧数 */
+export const SIEGE_VALUE = 600;
+/** 夺回己方本部所需的累计坐下帧数 */
+export const RECOVER_VALUE = 300;
+/** 无人推进多少帧后占领进度开始回退（5 秒） */
+export const DECAY_DELAY = 90;
+/** 自动迎战的追击距离上限（小格） */
+export const LEASH_RANGE = 12;
+/** 击倒对手：回复最大生命的比例、生命上限增加量 */
+export const KILL_HEAL = 0.3;
+export const KILL_MHP = 2;
+/** 每多少次击倒得一颗星，最多几颗 */
+export const STAR_KILLS = 3;
+export const STAR_MAX = 3;

@@ -2,6 +2,8 @@ import type { Rng } from './rng.ts';
 
 /** 一个单位槽位。字段名沿用原版 people[pn] 的命名，方便与 AS 源码对照。 */
 export interface Person {
+  /** 每次出生递增的编号（槽位会被复用，编队靠它识别同一个人） */
+  uid: number;
   stat: number;
   col: number;
   /** 小格坐标（逻辑位置；起步时即写入目标格） */
@@ -38,6 +40,19 @@ export interface Person {
    * 在 AS2（SWF7+）中 undefined++ 得到 NaN，而 NaN < 400 为假 —— 所以用 NaN 表示"未赋值"。
    */
   donothing: number;
+
+  // ---- 以下字段只在"校园战争"规则下使用 ----
+  /** 正在执行玩家或指挥官下达的指令：被打时不还手，继续前往目的地 */
+  ordered: boolean;
+  /** 自动迎战时的出发点；追出 LEASH_RANGE 以外就放弃 */
+  leash: boolean;
+  anchor_x: number;
+  anchor_y: number;
+  /** 行走中被打：走完这一步后回头反击的对象 */
+  retaliate: number;
+  /** 指挥官分配的任务与目标地块 */
+  task: number;
+  task_area: number;
 }
 
 export interface Area {
@@ -47,6 +62,12 @@ export interface Area {
   col: number;
   /** 各阵营的占领进度 */
   val: number[];
+  /** 各阵营最后一次推进进度的 tick（进度衰减用） */
+  touch: number[];
+  /** 本部是否沦陷（仅本部） */
+  fallen: boolean;
+  /** 攻陷本部的阵营 */
+  holder: number;
 }
 
 export interface Player {
@@ -55,6 +76,9 @@ export interface Player {
   basey: number;
   people_cnt: number;
   appear_cnt: number;
+  /** 集结点大格（-1 表示未设置；仅"校园战争"规则） */
+  rally_bx: number;
+  rally_by: number;
 }
 
 /** 模拟向界面层发出的事件（不存档） */
@@ -64,14 +88,26 @@ export type GameEvent =
   | { kind: 'levelup'; pn: number }
   | { kind: 'capture'; area: number; col: number }
   | { kind: 'appear'; pn: number; col: number }
+  | { kind: 'miss'; pn: number; px: number; py: number }
+  | { kind: 'fallen'; area: number; col: number; by: number }
+  | { kind: 'recovered'; area: number; col: number }
   | { kind: 'annihilated'; col: number; result: 'none' | 'win' | 'lose'; persistent: boolean };
 
-/** 规则变体。全部为 false/'classic' 时与原版完全一致。 */
+export type RuleSet = 'classic' | 'remake';
+export type AiLevel = 'classic' | 'easy' | 'normal' | 'hard';
+
+/** 规则。classic + classic AI 与原版完全一致；remake 为"校园战争"优化规则（docs/03）。 */
 export interface Rules {
-  ai: 'classic';
+  ruleset: RuleSet;
+  /** 每个阵营的电脑 AI（玩家阵营忽略） */
+  ai: AiLevel[];
 }
 
-export const CLASSIC_RULES: Rules = { ai: 'classic' };
+export const CLASSIC_RULES: Rules = { ruleset: 'classic', ai: ['classic', 'classic', 'classic', 'classic'] };
+
+export function remakeRules(level: Exclude<AiLevel, 'classic'> = 'normal'): Rules {
+  return { ruleset: 'remake', ai: [level, level, level, level] };
+}
 
 export interface Game {
   seed: number;
@@ -90,6 +126,9 @@ export interface Game {
   people: Person[];
   top: number;
   pn_com: number;
+  next_uid: number;
+  /** 玩家编队：每组保存成员 uid（界面功能，随存档保存） */
+  groups: number[][];
   /** 击杀统计（重制版新增，只用于结算显示，不影响规则） */
   kills: number[];
   /** 胜负结果（重制版新增，供结算界面使用） */
@@ -100,10 +139,19 @@ export interface Game {
 /** 玩家指令：对应原版 onMouseDown 中 operation_status == 2 的分支（862/f5:99-133） */
 export interface OrderCommand {
   type: 'order';
+  /** 下令的阵营；省略时为玩家阵营 */
+  col?: number;
   units: number[];
   bx: number;
   by: number;
   target: number;
 }
 
-export type Command = OrderCommand;
+/** 设置集结点（bx < 0 表示取消） */
+export interface RallyCommand {
+  type: 'rally';
+  bx: number;
+  by: number;
+}
+
+export type Command = OrderCommand | RallyCommand;

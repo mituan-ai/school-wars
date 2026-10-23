@@ -1,7 +1,7 @@
 // 对局状态的序列化。模拟是确定性的，所以"状态 + 随机数状态"就是完整存档。
-import type { Game } from './types.ts';
+import { CLASSIC_RULES, type Game } from './types.ts';
 
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 interface SaveFile {
   v: number;
@@ -23,8 +23,25 @@ export function deserializeGame(text: string): Game {
     throw new Error('不是有效的存档');
   }
   if (file.v > SAVE_VERSION) throw new Error(`存档版本 ${file.v} 比当前程序新`);
-  // 以后的格式迁移写在这里：if (file.v === 1) { ...; file.v = 2; }
+  if (file.v === 1) migrateV1(file.game as unknown as Record<string, unknown>);
   return { ...file.game, events: [] };
+}
+
+/** v1 → v2：v1 只有原版规则；补上"校园战争"规则新增的字段 */
+function migrateV1(game: Record<string, unknown>): void {
+  const g = game as unknown as Game;
+  g.rules = structuredClone(CLASSIC_RULES);
+  let uid = 0;
+  for (const p of g.people) {
+    Object.assign(p, {
+      uid: p.stat ? uid++ : -1,
+      ordered: false, leash: false, anchor_x: 0, anchor_y: 0, retaliate: -1, task: 0, task_area: -1,
+    });
+  }
+  for (const a of g.area) Object.assign(a, { touch: [0, 0, 0, 0], fallen: false, holder: -1 });
+  for (const pl of g.player) Object.assign(pl, { rally_bx: -1, rally_by: -1 });
+  g.next_uid = uid;
+  g.groups = Array.from({ length: 10 }, () => []);
 }
 
 /** 状态指纹，用于测试"读档后走向一致" */

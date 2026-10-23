@@ -1,5 +1,7 @@
 // 刷兵 ← 862/f2:1-118
-import { AREA, PEOPLE_CAP, PMAX, PS, SPEC_APPEAR, SPEC_HP, SPEC_PUNCH, SSIZE } from './constants.ts';
+import {
+  AREA, PEOPLE_CAP, PMAX, PS, REMAKE_APPEAR, REMAKE_HP, REMAKE_PUNCH, SPEC_APPEAR, SPEC_HP, SPEC_PUNCH, SSIZE,
+} from './constants.ts';
 import { random } from './rng.ts';
 import { baseFallen } from './query.ts';
 import { start_walk } from './unit.ts';
@@ -14,8 +16,9 @@ export function appear_people(g: Game, pn: number, cx: number, cy: number, col: 
   p.cy = cy;
   p.cnt = 10 + random(g.rng) * 20;
   p.dir = Math.floor(random(g.rng) * 4);
-  p.hp = p.mhp = SPEC_HP[col];
-  p.punch = SPEC_PUNCH[col];
+  const remake = g.rules.ruleset === 'remake';
+  p.hp = p.mhp = (remake ? REMAKE_HP : SPEC_HP)[col];
+  p.punch = (remake ? REMAKE_PUNCH : SPEC_PUNCH)[col];
   p.lev = 0;
   p.col = col;
   p.uid = g.next_uid++;
@@ -98,9 +101,9 @@ function check_add_people_remake(g: Game): void {
     const pl = g.player[i];
     if (!pl.exist || baseFallen(g, i)) continue;
     pl.appear_cnt += 2 + spades[i];
-    if (pl.appear_cnt > SPEC_APPEAR[i]) {
-      if (add_people(g, i)) pl.appear_cnt -= SPEC_APPEAR[i];
-      else pl.appear_cnt = SPEC_APPEAR[i] + 1;
+    if (pl.appear_cnt > REMAKE_APPEAR[i]) {
+      if (add_people(g, i)) pl.appear_cnt -= REMAKE_APPEAR[i];
+      else pl.appear_cnt = REMAKE_APPEAR[i] + 1;
     }
   }
 }
@@ -110,6 +113,6 @@ export function ticksToNextSpawn(g: Game, col: number): number {
   const pl = g.player[col];
   let spades = 0;
   for (const a of g.area) if (a.areatype === AREA.SPADE && a.col === col) spades++;
-  const need = SPEC_APPEAR[col] - pl.appear_cnt;
+  const need = (g.rules.ruleset === 'remake' ? REMAKE_APPEAR : SPEC_APPEAR)[col] - pl.appear_cnt;
   return Math.max(0, Math.floor(need / (2 + spades)) + 1);
 }

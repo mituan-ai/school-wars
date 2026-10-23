@@ -1,9 +1,10 @@
 // "校园战争"规则（docs/03 §2）的逐条断言
 import { describe, expect, it } from 'vitest';
-import { FPS, PS, SPEC_APPEAR, SSIZE } from '../src/core/constants.ts';
+import { FPS, PS, REMAKE_APPEAR, REMAKE_HP, SSIZE } from '../src/core/constants.ts';
 import { createGame } from '../src/core/mapgen.ts';
 import { deserializeGame, hashGame, serializeGame } from '../src/core/save.ts';
 import { applyCommand, step } from '../src/core/sim.ts';
+import { topBlocks } from '../src/core/query.ts';
 import { check_add_people } from '../src/core/spawn.ts';
 import { check_top, decay_areas, people_action, start_sit, start_walk } from '../src/core/unit.ts';
 import type { Game, Rules } from '../src/core/types.ts';
@@ -81,17 +82,25 @@ describe('众矢之的', () => {
     expect(g.top).toBe(-1);
   });
 
-  it('本部已沦陷的学校不受保护', () => {
+  it('电脑只主动进攻领先者；本部已沦陷的学校不受保护', () => {
     const g = blankGame(1, 4, R);
     g.player[0].people_cnt = 9;
     for (const c of [1, 2, 3]) g.player[c].people_cnt = 1;
     check_top(g);
     expect(g.top).toBe(0);
+    expect(topBlocks(g, 2, 3)).toBe(true);
+    expect(topBlocks(g, 2, 0)).toBe(false);
+    g.area[baseArea(g, 3)].fallen = true;
+    expect(topBlocks(g, 2, 3)).toBe(false);
+  });
+
+  it('学生总会迎战身边的敌人，不受众矢之的限制', () => {
+    const g = blankGame(1, 4, R);
+    g.player[0].people_cnt = 9;
+    for (const c of [1, 2, 3]) g.player[c].people_cnt = 1;
+    check_top(g);
     place(g, 0, 2, 30, 30);
     place(g, 1, 3, 33, 30);
-    start_sit(g, 0);
-    expect(g.people[0].stat).toBe(PS.SIT);
-    g.area[baseArea(g, 3)].fallen = true;
     start_sit(g, 0);
     expect(g.people[0].target_pn).toBe(1);
   });
@@ -104,13 +113,13 @@ describe('增援与占领进度', () => {
     for (let i = 0; i < 12; i++) place(g, i, 0, 20 + i, 20);
     for (let t = 0; t < 2000; t++) check_add_people(g);
     expect(pl.people_cnt).toBe(12);
-    expect(pl.appear_cnt).toBe(SPEC_APPEAR[0] + 1);
+    expect(pl.appear_cnt).toBe(REMAKE_APPEAR[0] + 1);
     pl.people_cnt = 11;
     g.people[11].stat = PS.EMPTY;
     g.smap[20 * SSIZE + 31] = -1;
     check_add_people(g);
     expect(pl.people_cnt).toBe(12);
-    expect(pl.appear_cnt).toBeLessThan(SPEC_APPEAR[0]);
+    expect(pl.appear_cnt).toBeLessThan(REMAKE_APPEAR[0]);
   });
 
   it('5 秒没人推进后，占领进度缓慢回退', () => {
@@ -213,8 +222,9 @@ describe('战斗手感', () => {
     for (let t = 0; t < 200 && g.people[1].stat !== PS.DEAD; t++) people_action(g);
     expect(g.people[1].stat).toBe(PS.DEAD);
     expect(g.smap[30 * SSIZE + 31]).toBe(-1);
-    expect(g.people[0].mhp).toBe(17);
-    expect(g.people[0].hp).toBeCloseTo(10 + 0.3 * 17);
+    const mhp = REMAKE_HP[3] + 2;
+    expect(g.people[0].mhp).toBe(mhp);
+    expect(g.people[0].hp).toBeCloseTo(10 + 0.3 * mhp);
     expect(g.people[0].lev).toBe(1);
     expect(checkInvariants(g)).toEqual([]);
   });
@@ -240,7 +250,7 @@ describe('集结点', () => {
   it('新兵自动前往集结点', () => {
     const g = blankGame(1, 0, R);
     applyCommand(g, { type: 'rally', bx: 8, by: 8 });
-    g.player[0].appear_cnt = SPEC_APPEAR[0];
+    g.player[0].appear_cnt = REMAKE_APPEAR[0];
     check_add_people(g);
     const p = g.people.find((q) => q.stat !== PS.EMPTY)!;
     expect(p.stat).toBe(PS.WALK);

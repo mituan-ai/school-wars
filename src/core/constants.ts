@@ -79,6 +79,11 @@ export const LEASH_RANGE = 12;
 /** 击倒对手：回复最大生命的比例、生命上限增加量 */
 export const KILL_HEAL = 0.3;
 export const KILL_MHP = 2;
+/** "校园战争"规则的阵营数值（按锦标赛结果调整，docs/03 §2.3） */
+export const REMAKE_APPEAR = [1500, 500, 1500, 1500];
+export const REMAKE_HP = [18, 12, 28, 14];
+export const REMAKE_PUNCH = [4, 4, 3, 5];
+
 /** 每多少次击倒得一颗星，最多几颗 */
 export const STAR_KILLS = 3;
 export const STAR_MAX = 3;

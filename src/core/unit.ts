@@ -4,7 +4,7 @@ import {
   ADDX, ADDY, AGGRO_RANGE, AREA, BSIZE, CAPTURE_VALUE, DECAY_DELAY, HEAL_PER_TICK, KILL_HEAL, KILL_MHP,
   LEASH_RANGE, MOVEX, MOVEY, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, SSIZE, TOP_RATIO,
 } from './constants.ts';
-import { topBlocks } from './query.ts';
+import { baseFallen, topBlocks } from './query.ts';
 import { random } from './rng.ts';
 import type { Area, Game, Person } from './types.ts';
 
@@ -100,7 +100,7 @@ export function start_sit(g: Game, pn: number): void {
 }
 
 /**
- * "校园战争"规则的自动迎战：优先打正在打我方的敌人，其次最近、血少的。
+ * "校园战争"规则的自动迎战：优先打正在打我方的敌人，其次最近、血少的；不受"众矢之的"限制。
  * 记下出发点；追不到或打完后回到原位。返回是否离开了座位。
  */
 function auto_engage(g: Game, pn: number): boolean {
@@ -115,7 +115,7 @@ function auto_engage(g: Game, pn: number): boolean {
     if (o.col === col) continue;
     const d = Math.abs(o.cx - p.cx) + Math.abs(o.cy - p.cy);
     if (d > AGGRO_RANGE) continue;
-    if (col !== g.user_col && topBlocks(g, col, o.col)) continue;
+    // "众矢之的"在新规则里只影响电脑的进攻选择（ai-commander），学生总会迎战身边的敌人
     let score = d * 4 + (o.hp / o.mhp) * 3;
     if (o.stat === PS.FIGHT && o.target_pn >= 0 && g.people[o.target_pn].col === col) score -= 20;
     if (o.target_pn === pn) score -= 20;
@@ -202,6 +202,10 @@ function sit_on_area_remake(g: Game, p: Person, n: number): void {
         a.fallen = true;
         a.holder = col;
         g.events.push({ kind: 'fallen', area: n, col: a.col, by: col });
+        if (g.player[a.col].people_cnt <= 0) {
+          g.player[a.col].exist = false;
+          on_annihilated(g, a.col);
+        }
         check_top(g);
       }
     } else if (a.col === col && a.fallen) {
@@ -588,7 +592,8 @@ function dying(g: Game, pn: number): void {
         if (g.smap[p.cy * SSIZE + p.cx] === pn) g.smap[p.cy * SSIZE + p.cx] = -1;
         const col = p.col;
         g.player[col].people_cnt--;
-        if (g.player[col].people_cnt <= 0) {
+        // "校园战争"规则：本部还在就会继续出兵，只有本部沦陷且无人时才出局
+        if (g.player[col].people_cnt <= 0 && !(remake(g) && !baseFallen(g, col))) {
           g.player[col].exist = false;
           on_annihilated(g, col);
         }

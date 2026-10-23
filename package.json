@@ -1,7 +1,7 @@
 {
   "name": "school-wars-remake",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "校园战争 School Wars — a fan remake of GAMEDESIGN's Flash RTS",
   "license": "MIT",
   "repository": {

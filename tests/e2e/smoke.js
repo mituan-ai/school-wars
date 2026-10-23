@@ -1,4 +1,4 @@
-// 端到端冒烟测试：选阵营 → 框选 → 右键占领 ♠ → 存档 → 退出 → 读档。
+// 端到端冒烟测试：选阵营 → 框选 → 右键占领营地 → 存档 → 退出 → 读档。
 // 先 npm run dev，再执行：playwright-cli open about:blank && playwright-cli run-code --filename=tests/e2e/smoke.js
 // 期望：log 中"占领成功: true"，读档 tick 等于存档 tick，errors 为空。
 async page => {
@@ -24,7 +24,7 @@ async page => {
   await page.mouse.move((box[0]+box[2])/2, (box[1]+box[3])/2, { steps: 4 });
   await page.mouse.move(box[2], box[3], { steps: 4 }); await page.mouse.up();
   log.push('选中: ' + await page.locator('.sel-text').textContent());
-  // 找最近的中立 ♠
+  // 找最近的中立营地
   const target = await page.evaluate(() => {
     const s = window.__sw, g = s.state, pl = g.player[g.user_col];
     const cands = g.area.filter(a => a.areatype === 2 && a.col < 0).map(a => ({ a, d: Math.abs(a.bx - pl.basex) + Math.abs(a.by - pl.basey) })).sort((x, y) => x.d - y.d);
@@ -33,7 +33,7 @@ async page => {
     const [x, y] = s.debugToScreen(a.bx * 48 - a.by * 48, a.by * 24 + a.bx * 24 + 24);
     return { idx, x, y, d: cands[0].d };
   });
-  log.push('目标♠ 距离 ' + target.d + ' 屏幕 ' + Math.round(target.x) + ',' + Math.round(target.y));
+  log.push('目标营地 距离 ' + target.d + ' 屏幕 ' + Math.round(target.x) + ',' + Math.round(target.y));
   await page.mouse.move(target.x, target.y);
   await page.waitForTimeout(200);
   await page.screenshot({ path: S + 'e_order.png' });

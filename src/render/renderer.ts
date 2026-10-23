@@ -1,16 +1,18 @@
 // 画面绘制：Canvas 2D。世界坐标与原版 mcStage 内坐标一致（大格菱形 96×48，小格 24×12）。
-// 分层：棋盘（离屏缓存）→ 地面（地块、光标）→ 按深度排序的学生与立体物件 → 特效 → 屏幕空间（框选、小地图）
-import { BSIZE, CAPTURE_VALUE, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE } from '../core/constants.ts';
+// 分层：校园景物 → 操场 → 地面（地块、光标、行进路线）→ 按深度排序的学生与立体物件 → 特效 → 屏幕空间（框选、小地图）
+import { AREA, BSIZE, CAPTURE_VALUE, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, SSIZE } from '../core/constants.ts';
 import { factionSpec, stars } from '../core/query.ts';
 import type { Area, Game } from '../core/types.ts';
 import { getLang, t } from '../i18n/index.ts';
 import { settings } from '../settings.ts';
 import { FACTION, NEUTRAL } from './palette.ts';
-import { drawStudent } from './student.ts';
+import { drawOutlined } from './outline.ts';
+import { drawScenery, schoolYard } from './scenery.ts';
+import { drawStudent, drawStudentShadow } from './student.ts';
 
 export const BOARD_W = BSIZE * 48; // 菱形半宽
 export const BOARD_H = BSIZE * 48; // 菱形高
-const SLAB = 16; // 棋盘厚度
+const CURB = 5; // 操场路沿的高度
 
 export class Camera {
   x = 0;
@@ -50,10 +52,15 @@ export interface ViewState {
   rect: { x1: number; y1: number; x2: number; y2: number } | null;
   /** 选中了己方本部（设置集结点） */
   baseSelected?: boolean;
+  /** 鼠标悬停的己方学生（点下去就会选中它） */
+  hoverPn?: number;
+  /** 已按 A，下一次点地面是进攻移动 */
+  amove?: boolean;
 }
 
 export interface Fx {
-  levelups: { pn: number; t0: number }[];
+  /** 升级：gain 为生命上限增加量；star 表示这次得了一颗星 */
+  levelups: { pn: number; t0: number; gain: number; star: boolean }[];
   impacts: { x: number; y: number; t0: number; big: boolean }[];
   blink: { bx: number; by: number; pn: number; t0: number } | null;
   /** 飘字（挥空的"闪"等） */
@@ -131,12 +138,16 @@ export function render(
 
   ctx.setTransform(dpr * cam.zoom, 0, 0, dpr * cam.zoom, dpr * (W / 2 - cam.x * cam.zoom), dpr * (H / 2 - cam.y * cam.zoom));
 
+  const [vx0, vy0] = cam.toWorld(0, 0);
+  const [vx1, vy1] = cam.toWorld(W, H);
+  drawScenery(ctx, g, vx0, vy0, vx1, vy1, now);
   paintBoard(ctx);
   drawGround(ctx, g, now);
   if (g.rules.ruleset === 'remake') drawRally(ctx, g, view, now);
+  drawRoutes(ctx, g, ip, view, now);
 
-  // 下令光标
-  if (view.cursorTile) drawTileCursor(ctx, view.cursorTile.bx, view.cursorTile.by, 'rgba(255,255,255,0.9)');
+  // 下令光标：进攻移动为红色
+  if (view.cursorTile) drawTileCursor(ctx, view.cursorTile.bx, view.cursorTile.by, view.amove ? '#ff6a5a' : 'rgba(255,255,255,0.9)');
   if (fx.blink && fx.blink.pn < 0) {
     const k = Math.floor((now - fx.blink.t0) / (1000 / 18));
     if (k < 7 && k % 2 === 1) drawTileCursor(ctx, fx.blink.bx, fx.blink.by, '#ffe066');
@@ -163,7 +174,8 @@ export function render(
   const remake = g.rules.ruleset === 'remake';
   for (const it of items) {
     if (it.area >= 0) {
-      drawSign(ctx, g, it.area, fx, now);
+      if (g.area[it.area].areatype === AREA.SPADE) drawCamp(ctx, g, it.area, fx, now);
+      else drawSpring(ctx, g, it.area, fx, now);
       continue;
     }
     const pn = it.pn;
@@ -177,15 +189,47 @@ export function render(
       x += back[0] * 2 * flash;
       y += back[1] * 2 * flash;
     }
-    if (view.selected.has(pn) && p.stat > PS.DEAD) {
+    const alive = p.stat > PS.DEAD;
+    const sel = alive && view.selected.has(pn);
+    const hover = alive && !sel && view.hoverPn === pn;
+    const nStars = remake ? stars(p.lev) : 0;
+    // 升级时向上弹一下
+    const lu = fx.levelups.find((f) => f.pn === pn);
+    if (lu && alive) {
+      const k = (now - lu.t0) / 420;
+      if (k < 1) y -= Math.sin(k * Math.PI) * (lu.star ? 7 : 5);
+    }
+    // 老兵脚下常驻淡金色光环
+    if (nStars > 0 && alive) {
       ctx.beginPath();
-      ctx.ellipse(x, y + 6, 11, 5.5, 0, 0, Math.PI * 2);
+      ctx.ellipse(x, y + 6, 10 + nStars, 5 + nStars / 2, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,214,90,${0.12 + 0.06 * nStars})`;
+      ctx.fill();
+    }
+    if (sel) {
+      const pulse = 0.5 + 0.5 * Math.sin(now / 180);
+      ctx.beginPath();
+      ctx.ellipse(x, y + 6, 12 + pulse, 6 + pulse / 2, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(120,255,200,0.18)';
+      ctx.fill();
       ctx.strokeStyle = 'rgba(120,255,200,0.95)';
       ctx.lineWidth = 1.6;
       ctx.stroke();
     }
-    drawStudent(ctx, x, y + 6, p.col, p.dir, p.show, flash);
-    if (p.stat > PS.DEAD) {
+    if (sel || hover) {
+      drawStudentShadow(ctx, x, y + 6, p.col, p.show);
+      drawOutlined(
+        ctx, x - 22, y - 50, 44, 62,
+        (c) => drawStudent(c, x, y + 6, p.col, p.dir, p.show, flash, false),
+        sel ? '#78ffc8' : 'rgba(255,255,255,0.9)',
+        (sel ? 1.8 : 1.1) * dpr,
+        sel ? 5 * dpr : 0,
+      );
+    } else {
+      drawStudent(ctx, x, y + 6, p.col, p.dir, p.show, flash);
+    }
+    if (alive && p.stat === PS.SIT && p.hp < p.mhp && healsHere(g, pn)) healPlus(ctx, x, y, now, pn);
+    if (alive) {
       // 血条宽度 = 生命值（原版 mcHP），所以老兵的血条更长
       const bw = p.mhp;
       const bx = x - Math.floor(p.mhp / 2);
@@ -196,7 +240,7 @@ export function render(
       ctx.fillRect(bx, by, bw, 2);
       ctx.fillStyle = p.hp / p.mhp > 0.35 ? '#5fe36f' : '#ffcf3a';
       ctx.fillRect(bx, by, Math.max(0, p.hp), 2);
-      const n = remake ? stars(p.lev) : 0;
+      const n = nStars;
       for (let i = 0; i < n; i++) star(ctx, x + (i - (n - 1) / 2) * 6, by - 4, 2.6, '#ffd84a');
     }
   }
@@ -293,21 +337,146 @@ function drawEffects(ctx: CanvasRenderingContext2D, g: Game, ip: Interp, fx: Fx,
   }
   ctx.globalAlpha = 1;
 
-  // 升级字样
-  fx.levelups = fx.levelups.filter((f) => now - f.t0 < 950);
-  ctx.font = `bold 9px ${font}`;
+  // 升级：脚下金色光圈扩散、光柱升起、金色碎光上飘、头顶飘字；得星时一颗大星落到头顶
+  fx.levelups = fx.levelups.filter((f) => now - f.t0 < 1300);
   for (const f of fx.levelups) {
-    if (g.people[f.pn].stat === PS.EMPTY) continue;
-    const k = (now - f.t0) / 950;
+    if (g.people[f.pn].stat <= PS.DEAD) continue;
+    const k = (now - f.t0) / 1300;
     const [x, y] = unitPos(g, ip, f.pn);
-    ctx.globalAlpha = k < 0.7 ? 1 : 1 - (k - 0.7) / 0.3;
+    const fy = y + 6;
+    ctx.save();
+    // 光圈
+    for (const delay of [0, 0.12]) {
+      const kk = Math.max(0, Math.min(1, (k - delay) / 0.45));
+      if (kk <= 0 || kk >= 1) continue;
+      ctx.globalAlpha = 1 - kk;
+      ctx.beginPath();
+      ctx.ellipse(x, fy, 8 + kk * 22, 4 + kk * 11, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = f.star ? '#fff3a0' : '#ffd84a';
+      ctx.lineWidth = 2.2 * (1 - kk) + 0.5;
+      ctx.stroke();
+    }
+    // 光柱
+    if (k < 0.6) {
+      const a = k < 0.15 ? k / 0.15 : 1 - (k - 0.15) / 0.45;
+      const hgt = 52 + (f.star ? 18 : 0);
+      const gr = ctx.createLinearGradient(0, fy - hgt, 0, fy);
+      gr.addColorStop(0, 'rgba(255,240,150,0)');
+      gr.addColorStop(0.6, 'rgba(255,225,110,0.45)');
+      gr.addColorStop(1, 'rgba(255,215,90,0.7)');
+      ctx.globalAlpha = a;
+      ctx.fillStyle = gr;
+      ctx.beginPath();
+      ctx.ellipse(x, fy, 9, 4.5, 0, 0, Math.PI);
+      ctx.lineTo(x - 7, fy - hgt);
+      ctx.lineTo(x + 7, fy - hgt);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // 上飘的碎光（位置由槽位号和序号决定，不需要存状态）
+    for (let i = 0; i < 8; i++) {
+      const ph = (i * 0.618 + f.pn * 0.37) % 1;
+      const kk = k * 1.4 - ph * 0.3;
+      if (kk <= 0 || kk >= 1) continue;
+      const ang = (i / 8) * Math.PI * 2;
+      ctx.globalAlpha = 1 - kk;
+      star(ctx, x + Math.cos(ang) * (6 + kk * 6), fy - 6 - kk * 36 + Math.sin(ang) * 3, 1.6, '#fff1a8');
+    }
+    ctx.restore();
+    // 飘字
+    const ta = k < 0.75 ? 1 : 1 - (k - 0.75) / 0.25;
+    const ty = y - 50 - Math.min(1, k * 2) * 12;
+    ctx.globalAlpha = ta;
     ctx.lineWidth = 2.5;
     ctx.strokeStyle = '#3a1b00';
-    ctx.strokeText(t('msg.levelup'), x, y - 48 - k * 14);
+    ctx.font = `900 9px ${font}`;
+    const title = f.star ? t('msg.star') : t('msg.levelup');
+    ctx.strokeText(title, x, ty);
     ctx.fillStyle = '#ffd84a';
-    ctx.fillText(t('msg.levelup'), x, y - 48 - k * 14);
+    ctx.fillText(title, x, ty);
+    ctx.font = `bold 6.5px ${font}`;
+    const sub = t('msg.levelup.gain', { n: f.gain });
+    ctx.lineWidth = 2;
+    ctx.strokeText(sub, x, ty + 8);
+    ctx.fillStyle = '#c8ffcf';
+    ctx.fillText(sub, x, ty + 8);
+    // 大星从光柱顶落到头顶的星位
+    if (f.star && k < 0.8) {
+      const kk = Math.min(1, k / 0.5);
+      const ease = 1 - (1 - kk) * (1 - kk);
+      ctx.globalAlpha = 1;
+      star(ctx, x, y - 72 + ease * 30, 6 - ease * 3, '#ffe14d');
+    }
     ctx.globalAlpha = 1;
   }
+}
+
+/** 选中的人的行进路线：一条通往目的地的淡虚线（进攻移动为红色），终点画个落点 */
+function drawRoutes(ctx: CanvasRenderingContext2D, g: Game, ip: Interp, view: ViewState, now: number): void {
+  if (view.selected.size === 0) return;
+  ctx.save();
+  ctx.lineWidth = 1.1;
+  ctx.setLineDash([3, 4]);
+  ctx.lineDashOffset = -now / 50;
+  for (const pn of view.selected) {
+    const p = g.people[pn];
+    if (p.stat !== PS.WALK && p.stat !== PS.WAIT) continue;
+    let tx: number;
+    let ty: number;
+    if (p.target_pn >= 0) {
+      const tp = g.people[p.target_pn];
+      tx = tp.px;
+      ty = tp.py + 6;
+    } else {
+      const dx = p.amove ? p.goal_x : p.dest_sx;
+      const dy = p.amove ? p.goal_y : p.dest_sy;
+      tx = dx * 12 - dy * 12;
+      ty = dy * 6 + dx * 6 + 6;
+    }
+    const [x, y] = unitPos(g, ip, pn);
+    const color = p.target_pn >= 0 || p.amove ? 'rgba(255,110,90,0.85)' : 'rgba(150,255,210,0.8)';
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(x, y + 6);
+    ctx.lineTo(tx, ty);
+    ctx.stroke();
+    if (p.target_pn < 0) {
+      ctx.setLineDash([]);
+      diamond(ctx, tx, ty, 6, 3);
+      ctx.stroke();
+      ctx.setLineDash([3, 4]);
+    }
+  }
+  ctx.restore();
+}
+
+/** 单位坐着的地方能不能给它回血（己方泉水，或未沦陷的己方本部） */
+function healsHere(g: Game, pn: number): boolean {
+  const p = g.people[pn];
+  const n = g.bmap_n[Math.floor(p.cy / 4) * BSIZE + Math.floor(p.cx / 4)];
+  if (n < 0) return false;
+  const a = g.area[n];
+  return a.col === p.col && (a.areatype === AREA.HEART || (a.areatype === AREA.BASE && !a.fallen && g.rules.ruleset === 'remake') || (a.areatype === AREA.BASE && g.rules.ruleset === 'classic'));
+}
+
+/** 回血时头顶冒出的绿色"+"，每人错开节拍 */
+function healPlus(ctx: CanvasRenderingContext2D, x: number, y: number, now: number, pn: number): void {
+  const k = ((now + pn * 233) % 1100) / 1100;
+  if (k > 0.7) return;
+  const kk = k / 0.7;
+  ctx.save();
+  ctx.globalAlpha = 1 - kk;
+  ctx.translate(x + 7, y - 20 - kk * 14);
+  ctx.fillStyle = '#5fe36f';
+  ctx.strokeStyle = 'rgba(10,60,20,0.8)';
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.rect(-0.9, -3, 1.8, 6);
+  ctx.rect(-3, -0.9, 6, 1.8);
+  ctx.stroke();
+  ctx.fill();
+  ctx.restore();
 }
 
 function star(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color: string): void {
@@ -334,29 +503,38 @@ function getComputedFontFamily(): string {
 // ---- 棋盘：直接矢量绘制。实测比离屏缓存再缩放贴图更快（软件渲染 1080p：0.6 ms 对 4.4 ms） ----
 
 function paintBoard(ctx: CanvasRenderingContext2D): void {
-  // 厚度侧面
-  ctx.fillStyle = '#7f858c';
+  // 操场四周的阴影与路沿侧面：操场比草地高一点，而不是悬在空中
+  diamond(ctx, 0, BOARD_H / 2 + CURB + 3, BOARD_W + 10, BOARD_H / 2 + 5);
+  ctx.fillStyle = 'rgba(20,50,15,0.28)';
+  ctx.fill();
+  ctx.fillStyle = '#a39c8c';
   ctx.beginPath();
-  ctx.moveTo(-BOARD_W, BOARD_H / 2);
-  ctx.lineTo(0, BOARD_H);
-  ctx.lineTo(0, BOARD_H + SLAB);
-  ctx.lineTo(-BOARD_W, BOARD_H / 2 + SLAB);
+  ctx.moveTo(-BOARD_W - 4, BOARD_H / 2);
+  ctx.lineTo(0, BOARD_H + 2);
+  ctx.lineTo(BOARD_W + 4, BOARD_H / 2);
+  ctx.lineTo(BOARD_W + 4, BOARD_H / 2 + CURB);
+  ctx.lineTo(0, BOARD_H + 2 + CURB);
+  ctx.lineTo(-BOARD_W - 4, BOARD_H / 2 + CURB);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = '#5e646b';
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
   ctx.beginPath();
-  ctx.moveTo(BOARD_W, BOARD_H / 2);
-  ctx.lineTo(0, BOARD_H);
-  ctx.lineTo(0, BOARD_H + SLAB);
-  ctx.lineTo(BOARD_W, BOARD_H / 2 + SLAB);
+  ctx.moveTo(0, BOARD_H + 2);
+  ctx.lineTo(BOARD_W + 4, BOARD_H / 2);
+  ctx.lineTo(BOARD_W + 4, BOARD_H / 2 + CURB);
+  ctx.lineTo(0, BOARD_H + 2 + CURB);
   ctx.closePath();
+  ctx.fill();
+  // 路沿顶面
+  diamond(ctx, 0, BOARD_H / 2, BOARD_W + 4, BOARD_H / 2 + 2);
+  ctx.fillStyle = '#c9c1ae';
   ctx.fill();
 
+  // 铺砖的操场
   diamond(ctx, 0, BOARD_H / 2, BOARD_W, BOARD_H / 2);
-  ctx.fillStyle = '#d3d6d8';
+  ctx.fillStyle = '#ddd6c6';
   ctx.fill();
-  // 棋盘格
-  ctx.fillStyle = '#cbced1';
+  ctx.fillStyle = '#d3cbb9';
   for (let by = 0; by < BSIZE; by++) {
     for (let bx = 0; bx < BSIZE; bx++) {
       if ((bx + by) % 2) continue;
@@ -364,8 +542,20 @@ function paintBoard(ctx: CanvasRenderingContext2D): void {
       ctx.fill();
     }
   }
-  ctx.strokeStyle = 'rgba(0,0,0,0.06)';
-  ctx.lineWidth = 0.8;
+  // 砖缝：大格的线深一点，小格的线很淡
+  ctx.strokeStyle = 'rgba(90,70,40,0.07)';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  for (let i = 0; i <= SSIZE; i++) {
+    if (i % 4 === 0) continue;
+    ctx.moveTo(-i * 12, i * 6);
+    ctx.lineTo(BOARD_W - i * 12, BOARD_H / 2 + i * 6);
+    ctx.moveTo(i * 12, i * 6);
+    ctx.lineTo(-BOARD_W + i * 12, BOARD_H / 2 + i * 6);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(90,70,40,0.16)';
+  ctx.lineWidth = 0.9;
   ctx.beginPath();
   for (let i = 0; i <= BSIZE; i++) {
     ctx.moveTo(-i * 48, i * 24);
@@ -385,35 +575,45 @@ function drawTileCursor(ctx: CanvasRenderingContext2D, bx: number, by: number, c
   ctx.setLineDash([]);
 }
 
-function spadePath(ctx: CanvasRenderingContext2D, s: number): void {
+/** 营地图标：帐篷剪影（中心在原点，半高 s） */
+export function tentPath(ctx: CanvasRenderingContext2D, s: number): void {
   ctx.beginPath();
   ctx.moveTo(0, -s);
-  ctx.bezierCurveTo(s * 0.35, -s * 0.55, s * 1.05, -s * 0.2, s * 0.85, s * 0.3);
-  ctx.bezierCurveTo(s * 0.7, s * 0.7, s * 0.2, s * 0.65, s * 0.08, s * 0.35);
-  ctx.lineTo(s * 0.3, s);
-  ctx.lineTo(-s * 0.3, s);
-  ctx.lineTo(-s * 0.08, s * 0.35);
-  ctx.bezierCurveTo(-s * 0.2, s * 0.65, -s * 0.7, s * 0.7, -s * 0.85, s * 0.3);
-  ctx.bezierCurveTo(-s * 1.05, -s * 0.2, -s * 0.35, -s * 0.55, 0, -s);
+  ctx.lineTo(s * 1.05, s * 0.8);
+  ctx.lineTo(s * 0.22, s * 0.8);
+  ctx.lineTo(0, s * 0.18);
+  ctx.lineTo(-s * 0.22, s * 0.8);
+  ctx.lineTo(-s * 1.05, s * 0.8);
   ctx.closePath();
 }
 
-function heartPath(ctx: CanvasRenderingContext2D, s: number): void {
+/** 泉水图标：十字（中心在原点，半宽 s） */
+export function crossPath(ctx: CanvasRenderingContext2D, s: number): void {
+  const w = s * 0.36;
   ctx.beginPath();
-  ctx.moveTo(0, s * 0.9);
-  ctx.bezierCurveTo(-s * 1.1, 0, -s * 0.9, -s, 0, -s * 0.45);
-  ctx.bezierCurveTo(s * 0.9, -s, s * 1.1, 0, 0, s * 0.9);
+  ctx.moveTo(-w, -s);
+  ctx.lineTo(w, -s);
+  ctx.lineTo(w, -w);
+  ctx.lineTo(s, -w);
+  ctx.lineTo(s, w);
+  ctx.lineTo(w, w);
+  ctx.lineTo(w, s);
+  ctx.lineTo(-w, s);
+  ctx.lineTo(-w, w);
+  ctx.lineTo(-s, w);
+  ctx.lineTo(-s, -w);
+  ctx.lineTo(-w, -w);
   ctx.closePath();
 }
 
-const EMBLEM_ZH = ['黑', '绿', '金', '紫'];
-const EMBLEM_EN = ['B', 'G', 'Y', 'P'];
+const EMBLEM_ZH = ['人', '兽', '矮', '精'];
+const EMBLEM_EN = ['H', 'O', 'D', 'E'];
 
 export function emblem(col: number): string {
   return (getLang() === 'zh' ? EMBLEM_ZH : EMBLEM_EN)[col] ?? '';
 }
 
-/** 地面层：本部场地、♠ / ♥ 地块的底色与进度环 */
+/** 地面层：本部场地、营地 / 泉水地块的底色与进度环 */
 function drawGround(ctx: CanvasRenderingContext2D, g: Game, now: number): void {
   const font = getComputedFontFamily();
   for (const a of g.area) {
@@ -469,11 +669,15 @@ function drawGround(ctx: CanvasRenderingContext2D, g: Game, now: number): void {
     ctx.stroke();
     ctx.save();
     groundSpace(ctx, x, y);
-    // 地面上的淡淡符号，远看也能分辨地块种类
-    if (a.areatype === 2) spadePath(ctx, 14);
-    else heartPath(ctx, 15);
-    ctx.fillStyle = owner >= 0 ? FACTION[owner].ui : NEUTRAL;
-    ctx.globalAlpha = 0.35;
+    // 地面上的淡淡符号，远看也能分辨地块种类：营地是帐篷，泉水是绿十字
+    if (a.areatype === AREA.SPADE) {
+      tentPath(ctx, 15);
+      ctx.fillStyle = owner >= 0 ? FACTION[owner].ui : NEUTRAL;
+    } else {
+      crossPath(ctx, 14);
+      ctx.fillStyle = '#3fbf5a';
+    }
+    ctx.globalAlpha = 0.32;
     ctx.fill();
     ctx.globalAlpha = 1;
     // 占领进度：显示进度最高的非持有阵营
@@ -500,64 +704,150 @@ function progressRing(ctx: CanvasRenderingContext2D, r: number, k: number, color
   ctx.globalAlpha = 1;
 }
 
-/** ♠ / ♥ 的立牌：立在大格中央，占领时升旗 */
-function drawSign(ctx: CanvasRenderingContext2D, g: Game, n: number, fx: Fx, now: number): void {
+/** 地块上方的小旗：占领后 0.6 秒升到顶 */
+function siteFlag(ctx: CanvasRenderingContext2D, x: number, top: number, owner: number, n: number, fx: Fx, now: number): void {
+  if (owner < 0) return;
+  const t0 = fx.raised.get(n);
+  const k = t0 === undefined ? 1 : Math.min(1, (now - t0) / 600);
+  const fy = top - 2 - 8 * k;
+  ctx.strokeStyle = '#4b3a2a';
+  ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  ctx.moveTo(x, top + 1);
+  ctx.lineTo(x, top - 11);
+  ctx.stroke();
+  const wave = Math.sin(now / 200 + n) * 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x, fy);
+  ctx.lineTo(x + 9, fy + 1.5 + wave);
+  ctx.lineTo(x, fy + 4);
+  ctx.closePath();
+  ctx.fillStyle = FACTION[owner].ui;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = 0.7;
+  ctx.stroke();
+}
+
+/** 营地：一顶帐篷，篷布是占领方的颜色 */
+function drawCamp(ctx: CanvasRenderingContext2D, g: Game, n: number, fx: Fx, now: number): void {
   const a = g.area[n];
   const [x, y] = tileCenter(a.bx, a.by);
   const owner = a.col;
-  const color = owner >= 0 ? FACTION[owner].ui : NEUTRAL;
-  // 影子与立柱
-  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  const base = owner >= 0 ? FACTION[owner].ui : '#d8d2bf';
+  const w = 13;
+  const hgt = 19;
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
   ctx.beginPath();
-  ctx.ellipse(x, y, 6, 2.5, 0, 0, Math.PI * 2);
+  ctx.ellipse(x + 2, y + 1, w + 3, 5, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#6b4a2b';
-  ctx.fillRect(x - 1.1, y - 18, 2.2, 18);
-  // 牌子
-  const bw = 18;
-  const bh = 13;
-  const top = y - 18;
-  ctx.fillStyle = color;
   ctx.strokeStyle = 'rgba(20,14,12,0.7)';
-  ctx.lineWidth = 1;
-  roundRect(ctx, x - bw / 2, top - bh, bw, bh, 3);
+  ctx.lineWidth = 0.9;
+  // 左右两片篷布
+  ctx.beginPath();
+  ctx.moveTo(x, y - hgt);
+  ctx.lineTo(x - w, y);
+  ctx.quadraticCurveTo(x - w / 2, y + 4.5, x, y + 5);
+  ctx.closePath();
+  ctx.fillStyle = mix(base, '#ffffff', 0.18);
   ctx.fill();
   ctx.stroke();
-  ctx.save();
-  ctx.translate(x, top - bh / 2);
-  if (a.areatype === 2) spadePath(ctx, 4.6);
-  else heartPath(ctx, 5);
-  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(x, y - hgt);
+  ctx.lineTo(x + w, y);
+  ctx.quadraticCurveTo(x + w / 2, y + 4.5, x, y + 5);
+  ctx.closePath();
+  ctx.fillStyle = mix(base, '#000000', 0.18);
   ctx.fill();
+  ctx.stroke();
+  // 门帘
+  ctx.beginPath();
+  ctx.moveTo(x - 1.5, y - 8);
+  ctx.lineTo(x - 5.5, y + 3.2);
+  ctx.lineTo(x + 0.5, y + 4.8);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(30,20,15,0.75)';
+  ctx.fill();
+  // 篷布上的缝线
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(x, y - hgt + 2);
+  ctx.lineTo(x - w / 2 - 1, y + 2);
+  ctx.moveTo(x, y - hgt + 2);
+  ctx.lineTo(x + w / 2 + 1, y + 2);
+  ctx.stroke();
+  if (settings.colorblind && owner >= 0) {
+    ctx.font = `900 6px ${getComputedFontFamily()}`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(emblem(owner), x + 6, y - 2);
+  }
+  siteFlag(ctx, x, y - hgt, owner, n, fx, now);
+}
+
+/** 泉水：一口石砌小泉，水面闪光；上方浮着绿十字，归属看石沿的颜色和小旗 */
+function drawSpring(ctx: CanvasRenderingContext2D, g: Game, n: number, fx: Fx, now: number): void {
+  const a = g.area[n];
+  const [x, y] = tileCenter(a.bx, a.by);
+  const owner = a.col;
+  const rx = 13;
+  const ry = 6.5;
+  const h = 4;
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(x + 2, y + 2, rx + 2, ry + 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 石沿侧面与顶面
+  ctx.beginPath();
+  ctx.ellipse(x, y + h, rx, ry, 0, 0, Math.PI);
+  ctx.lineTo(x - rx, y);
+  ctx.ellipse(x, y, rx, ry, 0, Math.PI, 0, true);
+  ctx.closePath();
+  ctx.fillStyle = '#8f8a80';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(20,14,12,0.6)';
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#bdb6a8';
+  ctx.fill();
+  ctx.lineWidth = owner >= 0 ? 2.2 : 0.8;
+  ctx.strokeStyle = owner >= 0 ? FACTION[owner].ui : 'rgba(20,14,12,0.6)';
+  ctx.stroke();
+  // 水面
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx - 3, ry - 1.8, 0, 0, Math.PI * 2);
+  const wg = ctx.createLinearGradient(x - rx, y - ry, x + rx, y + ry);
+  wg.addColorStop(0, '#9fe6ff');
+  wg.addColorStop(1, '#2f8fd0');
+  ctx.fillStyle = wg;
+  ctx.fill();
+  const sh = (now / 1400 + n * 0.3) % 1;
+  ctx.strokeStyle = `rgba(255,255,255,${0.7 * (1 - sh)})`;
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.ellipse(x, y, (rx - 4) * sh + 1, (ry - 2.5) * sh + 0.5, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  // 浮在上方的十字
+  const bob = Math.sin(now / 400 + n) * 1.5;
+  ctx.save();
+  ctx.translate(x, y - 15 + bob);
+  crossPath(ctx, 5);
+  ctx.fillStyle = owner >= 0 ? '#5fe36f' : '#cfd3cf';
+  ctx.fill();
+  ctx.strokeStyle = owner >= 0 ? 'rgba(10,70,25,0.9)' : 'rgba(60,60,60,0.7)';
+  ctx.lineWidth = 0.9;
+  ctx.stroke();
   ctx.restore();
   if (settings.colorblind && owner >= 0) {
     ctx.font = `900 6px ${getComputedFontFamily()}`;
     ctx.textAlign = 'center';
     ctx.fillStyle = '#fff';
-    ctx.fillText(emblem(owner), x + bw / 2 - 3, top - 2);
+    ctx.fillText(emblem(owner), x + rx - 2, y + 2);
   }
-  // 小旗：占领后 0.6 秒升到顶
-  if (owner >= 0) {
-    const t0 = fx.raised.get(n);
-    const k = t0 === undefined ? 1 : Math.min(1, (now - t0) / 600);
-    const fy = top - bh - 1 - 7 * k;
-    ctx.strokeStyle = '#4b3a2a';
-    ctx.lineWidth = 0.8;
-    ctx.beginPath();
-    ctx.moveTo(x - bw / 2 + 2, top - bh);
-    ctx.lineTo(x - bw / 2 + 2, top - bh - 10);
-    ctx.stroke();
-    const wave = Math.sin(now / 200 + n) * 1.2;
-    ctx.beginPath();
-    ctx.moveTo(x - bw / 2 + 2, fy);
-    ctx.lineTo(x - bw / 2 + 10, fy + 1.5 + wave);
-    ctx.lineTo(x - bw / 2 + 2, fy + 4);
-    ctx.closePath();
-    ctx.fillStyle = FACTION[owner].ui;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.stroke();
-  }
+  siteFlag(ctx, x - rx + 2, y - 3, owner, n, fx, now);
 }
 
 const SCHOOL_W = 30;
@@ -570,32 +860,25 @@ export function schoolAnchor(bx: number, by: number): [number, number] {
   const oy = bx === by ? (bx === 0 ? -1 : 1) : 0;
   const vx = ox * BOARD_W;
   const vy = BOARD_H / 2 + oy * (BOARD_H / 2);
-  return [vx + ox * (SCHOOL_W + 6), vy + oy * (SCHOOL_D + 6) + (oy > 0 ? SLAB : 0)];
+  return [vx + ox * (SCHOOL_W + 8), vy + oy * (SCHOOL_D + 8) + (oy > 0 ? CURB : 0)];
 }
 
 /** 世界坐标点是否落在校舍上（含屋顶和旗杆） */
 export function hitSchool(bx: number, by: number, wx: number, wy: number): boolean {
   const [cx, cy] = schoolAnchor(bx, by);
-  return Math.abs(wx - cx) <= SCHOOL_W + 2 && wy >= cy - SCHOOL_H - 31 && wy <= cy + SCHOOL_D;
+  return Math.abs(wx - cx) <= SCHOOL_W + 2 && wy >= cy - SCHOOL_H - 56 && wy <= cy + SCHOOL_D;
 }
 
-/** 校舍：屋顶是阵营色；沦陷时插上攻陷方的旗子 */
-function drawSchool(ctx: CanvasRenderingContext2D, g: Game, a: Area, now: number): void {
-  const c = FACTION[a.col];
-  const alive = g.player[a.col].exist;
-  const w = SCHOOL_W;
-  const d = SCHOOL_D;
-  const hgt = SCHOOL_H;
-  const [cx, cy] = schoolAnchor(a.bx, a.by);
-  const grey = !alive || a.fallen;
-  const wallL = grey ? '#9a9ea3' : '#e9e4d8';
-  const wallR = grey ? '#7d8186' : '#cfc8b8';
-  const roof = alive ? (a.fallen ? mix(c.ui, '#666', 0.55) : c.ui) : '#777b80';
-  // 影子
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  diamond(ctx, cx + 4, cy + 2, w + 2, d + 1);
-  ctx.fill();
-  // 左墙、右墙
+/** 各种族校舍的墙面颜色 */
+const WALLS: [string, string][] = [
+  ['#e9e4d8', '#cfc8b8'], // 人族：原版教学楼
+  ['#9a6638', '#7a4d27'], // 兽人：木屋
+  ['#b2b5b9', '#8f9398'], // 矮人：石堡
+  ['#f6f3ec', '#dcd8ce'], // 精灵：白墙
+];
+
+/** 两面墙（左墙向右下、右墙向右上） */
+function walls(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number, d: number, hgt: number, l: string, r: string): void {
   ctx.strokeStyle = 'rgba(20,14,12,0.6)';
   ctx.lineWidth = 0.8;
   ctx.beginPath();
@@ -604,7 +887,7 @@ function drawSchool(ctx: CanvasRenderingContext2D, g: Game, a: Area, now: number
   ctx.lineTo(cx, cy + d - hgt);
   ctx.lineTo(cx - w, cy - hgt);
   ctx.closePath();
-  ctx.fillStyle = wallL;
+  ctx.fillStyle = l;
   ctx.fill();
   ctx.stroke();
   ctx.beginPath();
@@ -613,55 +896,131 @@ function drawSchool(ctx: CanvasRenderingContext2D, g: Game, a: Area, now: number
   ctx.lineTo(cx + w, cy - hgt);
   ctx.lineTo(cx, cy + d - hgt);
   ctx.closePath();
-  ctx.fillStyle = wallR;
+  ctx.fillStyle = r;
   ctx.fill();
   ctx.stroke();
-  // 窗户：每面两层
-  ctx.fillStyle = grey ? '#5d6166' : '#5d86b8';
-  for (let row = 0; row < 2; row++) {
+}
+
+/** 墙面上沿等距方向的一条线（k 从 0 到 1 横穿墙面，h 为离地高度） */
+function wallLine(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number, d: number, h: number, left: boolean): void {
+  if (left) {
+    ctx.moveTo(cx - w, cy - h);
+    ctx.lineTo(cx, cy + d - h);
+  } else {
+    ctx.moveTo(cx, cy + d - h);
+    ctx.lineTo(cx + w, cy - h);
+  }
+}
+
+/** 校舍：各种族一种风格，屋顶 / 旗帜是阵营色；沦陷时插上攻陷方的旗子 */
+function drawSchool(ctx: CanvasRenderingContext2D, g: Game, a: Area, now: number): void {
+  const col = a.col;
+  const c = FACTION[col];
+  const alive = g.player[col].exist;
+  const w = SCHOOL_W;
+  const d = SCHOOL_D;
+  const hgt = col === 3 ? SCHOOL_H + 2 : col === 2 ? SCHOOL_H - 2 : SCHOOL_H;
+  const [cx, cy] = schoolAnchor(a.bx, a.by);
+  const grey = !alive || a.fallen;
+  const tone = (v: string) => (grey ? mix(v, '#8d9196', 0.6) : v);
+  const [wl, wr] = WALLS[col];
+  const roof = alive ? (a.fallen ? mix(c.ui, '#666', 0.55) : c.ui) : '#777b80';
+  schoolYard(ctx, col, cx, cy, w, d);
+  // 影子
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  diamond(ctx, cx + 4, cy + 2, w + 2, d + 1);
+  ctx.fill();
+  walls(ctx, cx, cy, w, d, hgt, tone(wl), tone(wr));
+
+  // 墙面细节
+  ctx.save();
+  if (col === 1) {
+    // 木板缝
+    ctx.strokeStyle = 'rgba(40,20,5,0.45)';
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    for (let h = 5; h < hgt; h += 5) {
+      wallLine(ctx, cx, cy, w, d, h, true);
+      wallLine(ctx, cx, cy, w, d, h, false);
+    }
+    ctx.stroke();
+  } else if (col === 2) {
+    // 石块
+    ctx.strokeStyle = 'rgba(40,40,48,0.35)';
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    for (let h = 5; h < hgt; h += 5) {
+      wallLine(ctx, cx, cy, w, d, h, true);
+      wallLine(ctx, cx, cy, w, d, h, false);
+      const off = (h / 5) % 2 ? 0.5 : 0;
+      for (let k = 0.2 + off * 0.2; k < 1; k += 0.2) {
+        ctx.moveTo(cx - w + w * k, cy + d * k - h);
+        ctx.lineTo(cx - w + w * k, cy + d * k - h + 5);
+        ctx.moveTo(cx + w * k, cy + d - d * k - h);
+        ctx.lineTo(cx + w * k, cy + d - d * k - h + 5);
+      }
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // 窗户
+  ctx.fillStyle = grey ? '#5d6166' : col === 1 ? '#2a1a0e' : col === 3 ? '#7fe0c8' : '#5d86b8';
+  const rows = col === 2 ? 1 : 2;
+  for (let row = 0; row < rows; row++) {
     for (let i = 0; i < 3; i++) {
       const k = (i + 0.5) / 3;
-      const wy = -hgt + 6 + row * 9;
-      win(ctx, cx - w + w * k, cy + d * k + wy, -1);
-      win(ctx, cx + w * k, cy + d - d * k + wy, 1);
+      const wy = -hgt + 6 + row * 9 + (col === 2 ? 5 : 0);
+      win(ctx, cx - w + w * k, cy + d * k + wy, -1, col === 3);
+      win(ctx, cx + w * k, cy + d - d * k + wy, 1, col === 3);
     }
   }
-  // 屋顶（四坡）
+
   const ry = cy - hgt;
-  const apexY = ry - 13;
-  ctx.fillStyle = mix(roof, '#000000', 0.25);
-  ctx.beginPath();
-  ctx.moveTo(cx - w - 2, ry);
-  ctx.lineTo(cx, ry - d - 1);
-  ctx.lineTo(cx + w + 2, ry);
-  ctx.lineTo(cx, apexY);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(cx - w - 2, ry);
-  ctx.lineTo(cx, ry + d + 1);
-  ctx.lineTo(cx, apexY);
-  ctx.closePath();
-  ctx.fillStyle = roof;
-  ctx.fill();
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx, ry + d + 1);
-  ctx.lineTo(cx + w + 2, ry);
-  ctx.lineTo(cx, apexY);
-  ctx.closePath();
-  ctx.fillStyle = mix(roof, '#000000', 0.15);
-  ctx.fill();
-  ctx.stroke();
+  let apexY = ry - 13;
+  if (col === 2) {
+    apexY = flatRoof(ctx, cx, ry, w, d, tone('#a1a5ab'), roof, now, grey);
+  } else {
+    const rise = col === 3 ? 38 : col === 1 ? 17 : 13;
+    apexY = ry - rise;
+    hipRoof(ctx, cx, ry, w, d, apexY, roof, col === 1 ? 4 : 2);
+    if (col === 1) {
+      // 兽人：屋脊两端的獠牙
+      ctx.strokeStyle = 'rgba(20,14,12,0.7)';
+      ctx.lineWidth = 0.7;
+      for (const sx of [-1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(cx + sx * 2, apexY + 2);
+        ctx.quadraticCurveTo(cx + sx * 9, apexY - 1, cx + sx * 8, apexY - 9);
+        ctx.quadraticCurveTo(cx + sx * 6, apexY - 2, cx + sx * 1, apexY + 4);
+        ctx.closePath();
+        ctx.fillStyle = '#f3ecd6';
+        ctx.fill();
+        ctx.stroke();
+      }
+    } else if (col === 3) {
+      // 精灵：墙上的藤蔓
+      ctx.fillStyle = grey ? '#7a8a7a' : '#4fae5a';
+      for (let i = 0; i < 9; i++) {
+        const k = (i + 0.5) / 9;
+        const yy = ry + 2 + Math.sin(i * 1.7) * 2.5;
+        ctx.beginPath();
+        ctx.arc(cx - w + w * k, yy + d * k, 1.5, 0, Math.PI * 2);
+        ctx.arc(cx + w * k, yy + d - d * k, 1.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
   // 校徽字
   ctx.font = `900 9px ${getComputedFontFamily()}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  ctx.fillText(emblem(a.col), cx - w / 2, ry + d / 2 - 3);
+  if (col === 2) ctx.fillText(emblem(col), cx - w / 2, cy + d / 2 - hgt + 8);
+  else ctx.fillText(emblem(col), cx - w / 2, ry + d / 2 - 3);
   ctx.textBaseline = 'alphabetic';
   // 旗杆与旗子：平时是自己的校旗，沦陷时换成攻陷方的
-  const flagCol = a.fallen && a.holder >= 0 ? a.holder : alive ? a.col : -1;
+  const flagCol = a.fallen && a.holder >= 0 ? a.holder : alive ? col : -1;
   if (flagCol >= 0) {
     ctx.strokeStyle = '#3d3a36';
     ctx.lineWidth = 1;
@@ -682,12 +1041,99 @@ function drawSchool(ctx: CanvasRenderingContext2D, g: Game, a: Area, now: number
   }
 }
 
-/** 墙面上的平行四边形小窗；side < 0 为左墙（向右下倾斜），否则为右墙 */
-function win(ctx: CanvasRenderingContext2D, x: number, y: number, side: number): void {
+/** 四坡屋顶（人族、兽人）；顶点更高就是精灵的尖塔 */
+function hipRoof(ctx: CanvasRenderingContext2D, cx: number, ry: number, w: number, d: number, apexY: number, roof: string, eave: number): void {
+  ctx.strokeStyle = 'rgba(20,14,12,0.6)';
+  ctx.lineWidth = 0.8;
+  ctx.fillStyle = mix(roof, '#000000', 0.25);
+  ctx.beginPath();
+  ctx.moveTo(cx - w - eave, ry);
+  ctx.lineTo(cx, ry - d - 1);
+  ctx.lineTo(cx + w + eave, ry);
+  ctx.lineTo(cx, apexY);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx - w - eave, ry);
+  ctx.lineTo(cx, ry + d + 1);
+  ctx.lineTo(cx, apexY);
+  ctx.closePath();
+  ctx.fillStyle = roof;
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx, ry + d + 1);
+  ctx.lineTo(cx + w + eave, ry);
+  ctx.lineTo(cx, apexY);
+  ctx.closePath();
+  ctx.fillStyle = mix(roof, '#000000', 0.15);
+  ctx.fill();
+  ctx.stroke();
+}
+
+/** 矮人石堡：平顶加城垛，一侧有冒烟的烟囱，正面挂阵营色的长幡；返回旗杆底部的高度 */
+function flatRoof(
+  ctx: CanvasRenderingContext2D, cx: number, ry: number, w: number, d: number, stone: string, banner: string, now: number, grey: boolean,
+): number {
+  diamond(ctx, cx, ry, w, d);
+  ctx.fillStyle = mix(stone, '#000000', 0.1);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(20,14,12,0.6)';
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  // 城垛：沿两条前沿的一排小方块
+  ctx.fillStyle = stone;
+  for (let i = 0; i <= 6; i++) {
+    const k = i / 6;
+    for (const [x, y] of [[cx - w + w * k, ry + d * k], [cx + w * k, ry + d - d * k]]) {
+      ctx.beginPath();
+      ctx.rect(x - 2, y - 4, 4, 4);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+  // 烟囱和烟
+  const chx = cx + w * 0.45;
+  const chy = ry - d * 0.2;
+  ctx.fillStyle = '#7d6a5a';
+  ctx.beginPath();
+  ctx.rect(chx - 3, chy - 12, 6, 12);
+  ctx.fill();
+  ctx.stroke();
+  if (!grey) {
+    for (let i = 0; i < 3; i++) {
+      const k = ((now / 2200 + i / 3) % 1);
+      ctx.globalAlpha = 0.45 * (1 - k);
+      ctx.fillStyle = '#e8e8e8';
+      ctx.beginPath();
+      ctx.arc(chx + k * 6, chy - 14 - k * 16, 2.5 + k * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  // 正面长幡
+  const bx = cx - w * 0.5;
+  const by = ry + d * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(bx - 4, by + 1);
+  ctx.lineTo(bx + 4, by + 5);
+  ctx.lineTo(bx + 4, by + 15);
+  ctx.lineTo(bx, by + 11);
+  ctx.lineTo(bx - 4, by + 11);
+  ctx.closePath();
+  ctx.fillStyle = banner;
+  ctx.fill();
+  ctx.stroke();
+  return ry - d * 0.15 - 3;
+}
+
+/** 墙面上的平行四边形小窗；side < 0 为左墙（向右下倾斜），否则为右墙；arch 为精灵的拱形窗 */
+function win(ctx: CanvasRenderingContext2D, x: number, y: number, side: number, arch = false): void {
   const slope = side < 0 ? 0.5 : -0.5;
   ctx.beginPath();
   ctx.moveTo(x - 2.5, y - 2.5 * slope);
-  ctx.lineTo(x + 2.5, y + 2.5 * slope);
+  if (arch) ctx.quadraticCurveTo(x, y - 4, x + 2.5, y + 2.5 * slope);
+  else ctx.lineTo(x + 2.5, y + 2.5 * slope);
   ctx.lineTo(x + 2.5, y + 2.5 * slope + 4);
   ctx.lineTo(x - 2.5, y - 2.5 * slope + 4);
   ctx.closePath();
@@ -777,7 +1223,7 @@ function drawMinimap(ctx: CanvasRenderingContext2D, g: Game, cam: Camera, fx: Fx
   const h = Math.round((BOARD_H + 40) * s);
   const x0 = cam.w - w - 14;
   const y0 = cam.h - h - 14;
-  ctx.fillStyle = 'rgba(6,10,20,0.78)';
+  ctx.fillStyle = 'rgba(28,58,24,0.85)';
   ctx.strokeStyle = 'rgba(255,255,255,0.18)';
   ctx.lineWidth = 1;
   roundRect(ctx, x0, y0, w, h, 8);
@@ -790,7 +1236,7 @@ function drawMinimap(ctx: CanvasRenderingContext2D, g: Game, cam: Camera, fx: Fx
   ctx.rect(x0, y0, w, h);
   ctx.clip();
   diamond(ctx, ox, oy + (BOARD_H / 2) * s, BOARD_W * s, (BOARD_H / 2) * s);
-  ctx.fillStyle = '#4a4f57';
+  ctx.fillStyle = '#6d6a62';
   ctx.fill();
   ctx.font = `900 ${Math.max(7, Math.round(40 * s))}px ${getComputedFontFamily()}`;
   ctx.textAlign = 'center';

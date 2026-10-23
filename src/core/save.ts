@@ -1,7 +1,7 @@
 // 对局状态的序列化。模拟是确定性的，所以"状态 + 随机数状态"就是完整存档。
 import { CLASSIC_RULES, type Game } from './types.ts';
 
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 interface SaveFile {
   v: number;
@@ -24,6 +24,7 @@ export function deserializeGame(text: string): Game {
   }
   if (file.v > SAVE_VERSION) throw new Error(`存档版本 ${file.v} 比当前程序新`);
   if (file.v === 1) migrateV1(file.game as unknown as Record<string, unknown>);
+  if (file.v <= 2) migrateV2(file.game as unknown as Game);
   return { ...file.game, events: [] };
 }
 
@@ -42,6 +43,11 @@ function migrateV1(game: Record<string, unknown>): void {
   for (const pl of g.player) Object.assign(pl, { rally_bx: -1, rally_by: -1 });
   g.next_uid = uid;
   g.groups = Array.from({ length: 10 }, () => []);
+}
+
+/** v2 → v3：补上寻路等待计数和进攻移动的字段 */
+function migrateV2(g: Game): void {
+  for (const p of g.people) Object.assign(p, { stuck: 0, amove: false, goal_x: 0, goal_y: 0 });
 }
 
 /** 状态指纹，用于测试"读档后走向一致" */

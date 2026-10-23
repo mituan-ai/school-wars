@@ -33,12 +33,12 @@ describe('攻陷本部', () => {
     const g = blankGame(1, 4, R);
     const n = baseArea(g, 2);
     const a = g.area[n];
-    place(g, 0, 0, a.bx * 4 + 1, a.by * 4 + 1);
+    place(g, 0, 1, a.bx * 4 + 1, a.by * 4 + 1); // 兽人没有占领加成
     sitFor(g, 0, 599);
     expect(a.fallen).toBe(false);
     sitFor(g, 0, 1);
     expect(a.fallen).toBe(true);
-    expect(a.holder).toBe(0);
+    expect(a.holder).toBe(1);
     expect(a.col).toBe(2);
 
     // 不增援：计数冻结
@@ -50,7 +50,7 @@ describe('攻陷本部', () => {
     // 不回血（先撤走攻方，免得打起来）
     g.people[0].stat = PS.EMPTY;
     g.smap[g.people[0].cy * SSIZE + g.people[0].cx] = -1;
-    g.player[0].people_cnt--;
+    g.player[1].people_cnt--;
     place(g, 1, 2, a.bx * 4 + 2, a.by * 4 + 2);
     g.people[1].hp = 5;
     sitFor(g, 1, 299);
@@ -125,15 +125,15 @@ describe('增援与占领进度', () => {
   it('5 秒没人推进后，占领进度缓慢回退', () => {
     const g = blankGame(1, 4, R);
     const n = addArea(g, 7, 7, 2);
-    place(g, 0, 0, 29, 29);
+    place(g, 0, 1, 29, 29);
     sitFor(g, 0, 100);
-    expect(g.area[n].val[0]).toBe(100);
+    expect(g.area[n].val[1]).toBe(100);
     g.people[0].stat = PS.EMPTY;
     for (let t = 0; t < 5 * FPS; t++, g.tick++) decay_areas(g);
-    expect(g.area[n].val[0]).toBe(100);
+    expect(g.area[n].val[1]).toBe(100);
     for (let t = 0; t < 100; t++, g.tick++) decay_areas(g);
-    expect(g.area[n].val[0]).toBeLessThan(100);
-    expect(g.area[n].val[0]).toBeGreaterThan(40);
+    expect(g.area[n].val[1]).toBeLessThan(100);
+    expect(g.area[n].val[1]).toBeGreaterThan(40);
   });
 });
 
@@ -217,14 +217,14 @@ describe('战斗手感', () => {
     place(g, 0, 3, 30, 30);
     place(g, 1, 1, 31, 30);
     g.people[1].hp = 1;
-    g.people[0].hp = 10;
+    g.people[0].hp = 6;
     start_walk(g, 0, 0, 0, 1);
     for (let t = 0; t < 200 && g.people[1].stat !== PS.DEAD; t++) people_action(g);
     expect(g.people[1].stat).toBe(PS.DEAD);
     expect(g.smap[30 * SSIZE + 31]).toBe(-1);
     const mhp = REMAKE_HP[3] + 2;
     expect(g.people[0].mhp).toBe(mhp);
-    expect(g.people[0].hp).toBeCloseTo(10 + 0.3 * mhp);
+    expect(g.people[0].hp).toBeCloseTo(6 + 0.3 * mhp);
     expect(g.people[0].lev).toBe(1);
     expect(checkInvariants(g)).toEqual([]);
   });

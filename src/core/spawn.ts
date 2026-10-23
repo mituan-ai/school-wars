@@ -27,6 +27,8 @@ export function appear_people(g: Game, pn: number, cx: number, cy: number, col: 
   p.retaliate = -1;
   p.task = 0;
   p.task_area = -1;
+  p.stuck = 0;
+  p.amove = false;
   p.px = cx * 12 - cy * 12;
   p.py = cy * 6 + cx * 6;
   // 原版显示第 col*100 + 11 + dir*25 帧，即站立姿势；pat 本身不重置

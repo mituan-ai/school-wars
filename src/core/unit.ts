@@ -1,9 +1,11 @@
 // 单位状态机 ← 862/f3（函数名、分支顺序与原版保持一致）
 // "校园战争"规则（docs/03 §2）以 remake 分支插在少数几处，经典规则的执行路径保持不变。
 import {
-  ADDX, ADDY, AGGRO_RANGE, AREA, BSIZE, CAPTURE_VALUE, DECAY_DELAY, HEAL_PER_TICK, KILL_HEAL, KILL_MHP,
-  LEASH_RANGE, MOVEX, MOVEY, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, SSIZE, TOP_RATIO,
+  ADDX, ADDY, AGGRO_RANGE, AMOVE_RANGE, AREA, BSIZE, CAPTURE_VALUE, DECAY_DELAY, HEAL_PER_TICK, KILL_HEAL, KILL_MHP,
+  LEASH_RANGE, MOVEX, MOVEY, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, SSIZE, STUCK_TRIES, TOP_RATIO,
+  TRAIT_CAPTURE, TRAIT_HEAL, TRAIT_HIT_TAKEN,
 } from './constants.ts';
+import { freeCellNear, nextDir, STEP_WAIT } from './path.ts';
 import { baseFallen, topBlocks } from './query.ts';
 import { random } from './rng.ts';
 import type { Area, Game, Person } from './types.ts';
@@ -57,7 +59,8 @@ function people_pos(g: Game, pn: number): void {
 export function start_stand(g: Game, pn: number): void {
   const p = g.people[pn];
   p.stat = PS.STAND;
-  p.cnt = 20 + random(g.rng) * 30;
+  // 进攻移动途中打完一架，稍站一下就继续前进
+  p.cnt = (p.amove ? 4 : 20) + random(g.rng) * (p.amove ? 4 : 30);
   p.hc = 0;
   p.pat = 10;
   people_pat(g, pn);
@@ -100,10 +103,10 @@ export function start_sit(g: Game, pn: number): void {
 }
 
 /**
- * "校园战争"规则的自动迎战：优先打正在打我方的敌人，其次最近、血少的；不受"众矢之的"限制。
- * 记下出发点；追不到或打完后回到原位。返回是否离开了座位。
+ * "校园战争"规则的索敌：优先打正在打我方的敌人，其次最近、血少的；不受"众矢之的"限制。
+ * 返回槽位号，没有则返回 -1。
  */
-function auto_engage(g: Game, pn: number): boolean {
+function pick_enemy(g: Game, pn: number, range: number): number {
   const p = g.people[pn];
   const col = p.col;
   let best = -1;
@@ -114,7 +117,7 @@ function auto_engage(g: Game, pn: number): boolean {
     if (o.stat <= PS.DEAD) continue;
     if (o.col === col) continue;
     const d = Math.abs(o.cx - p.cx) + Math.abs(o.cy - p.cy);
-    if (d > AGGRO_RANGE) continue;
+    if (d > range) continue;
     // "众矢之的"在新规则里只影响电脑的进攻选择（ai-commander），学生总会迎战身边的敌人
     let score = d * 4 + (o.hp / o.mhp) * 3;
     if (o.stat === PS.FIGHT && o.target_pn >= 0 && g.people[o.target_pn].col === col) score -= 20;
@@ -124,6 +127,16 @@ function auto_engage(g: Game, pn: number): boolean {
       best = i;
     }
   }
+  return best;
+}
+
+/**
+ * "校园战争"规则的自动迎战。记下出发点；追不到或打完后回到原位（进攻移动则继续前往目的地）。
+ * 返回是否离开了座位。
+ */
+function auto_engage(g: Game, pn: number): boolean {
+  const p = g.people[pn];
+  const best = pick_enemy(g, pn, AGGRO_RANGE);
   if (best >= 0) {
     if (!p.leash) {
       p.leash = true;
@@ -135,11 +148,17 @@ function auto_engage(g: Game, pn: number): boolean {
   }
   if (p.leash) {
     p.leash = false;
-    if (p.cx !== p.anchor_x || p.cy !== p.anchor_y) {
-      walk_to_cell(g, pn, p.anchor_x, p.anchor_y);
+    const [x, y] = p.amove ? [p.goal_x, p.goal_y] : [p.anchor_x, p.anchor_y];
+    if (p.cx !== x || p.cy !== y) {
+      walk_to_cell(g, pn, x, y);
       return true;
     }
   }
+  if (p.amove && (p.cx !== p.goal_x || p.cy !== p.goal_y)) {
+    walk_to_cell(g, pn, p.goal_x, p.goal_y);
+    return true;
+  }
+  p.amove = false;
   return false;
 }
 
@@ -219,14 +238,14 @@ function sit_on_area_remake(g: Game, p: Person, n: number): void {
   }
   const heals = (a.areatype === AREA.BASE && !a.fallen) || a.areatype === AREA.HEART;
   if (heals && a.col === col && p.hp < p.mhp) {
-    p.hp += HEAL_PER_TICK;
+    p.hp += HEAL_PER_TICK * TRAIT_HEAL[col];
     if (p.hp > p.mhp) p.hp = p.mhp;
   }
 }
 
 /** 推进 col 的进度；满了就清空所有进度并返回 true */
 function advance(g: Game, a: Area, col: number, need: number): boolean {
-  a.val[col]++;
+  a.val[col] += TRAIT_CAPTURE[col];
   a.touch[col] = g.tick;
   if (a.val[col] < need) return false;
   for (let i = 0; i < 4; i++) a.val[i] = 0;
@@ -238,7 +257,7 @@ export function decay_areas(g: Game): void {
   if (g.tick % 2) return;
   for (const a of g.area) {
     for (let c = 0; c < 4; c++) {
-      if (a.val[c] > 0 && g.tick - a.touch[c] > DECAY_DELAY) a.val[c]--;
+      if (a.val[c] > 0 && g.tick - a.touch[c] > DECAY_DELAY) a.val[c] = Math.max(0, a.val[c] - 1);
     }
   }
 }
@@ -288,7 +307,21 @@ export function start_turn(g: Game, pn: number): void {
     p.dest_sx = t.cx;
     p.dest_sy = t.cy;
   }
-  if (!set_dir(g, pn)) {
+  if (remake(g)) {
+    const d = path_dir(g, pn);
+    if (d < 0) {
+      if (d === STEP_WAIT && p.stuck < STUCK_TRIES) {
+        p.stuck++;
+        start_wait(g, pn);
+        p.cnt = 3 + random(g.rng) * 3;
+      } else {
+        start_stand(g, pn);
+      }
+      return;
+    }
+    p.dir = d;
+    p.stuck = 0;
+  } else if (!set_dir(g, pn)) {
     if (p.stat === PS.WAIT) start_stand(g, pn);
     else start_wait(g, pn);
     return;
@@ -306,6 +339,26 @@ export function start_turn(g: Game, pn: number): void {
   p.cy = cy;
 }
 
+/** "校园战争"规则：A* 选下一步；目的地被人坐着时改去旁边最近的空格 */
+function path_dir(g: Game, pn: number): number {
+  const p = g.people[pn];
+  if (p.target_pn < 0) {
+    const o = g.smap[p.dest_sy * SSIZE + p.dest_sx];
+    if (o >= 0 && o !== pn && g.people[o].stat !== PS.WALK) {
+      const c = freeCellNear(g, pn, p.dest_sx, p.dest_sy);
+      if (c) {
+        p.dest_sx = c[0];
+        p.dest_sy = c[1];
+        if (p.amove) {
+          p.goal_x = c[0];
+          p.goal_y = c[1];
+        }
+      }
+    }
+  }
+  return nextDir(g, pn, p.dest_sx, p.dest_sy, p.stuck > 0);
+}
+
 // 862/f3:260
 function walking(g: Game, pn: number): void {
   const p = g.people[pn];
@@ -316,7 +369,7 @@ function walking(g: Game, pn: number): void {
   if (p.pat >= 10) p.pat = 0;
   p.cnt++;
   if (p.cnt < 6) return;
-  if (remake(g)) step_boundary_remake(g, p);
+  if (remake(g)) step_boundary_remake(g, pn);
   if (p.target_pn >= 0) {
     const t = g.people[p.target_pn];
     if (t.stat <= PS.DEAD) {
@@ -328,6 +381,7 @@ function walking(g: Game, pn: number): void {
       return;
     }
   } else if (p.cx === p.dest_sx && p.cy === p.dest_sy) {
+    if (p.amove && p.cx === p.goal_x && p.cy === p.goal_y) p.amove = false;
     start_stand(g, pn);
     return;
   }
@@ -335,7 +389,8 @@ function walking(g: Game, pn: number): void {
 }
 
 /** "校园战争"规则：走完一步时，先回头反击路上打我的人，再检查追击是否超出范围 */
-function step_boundary_remake(g: Game, p: Person): void {
+function step_boundary_remake(g: Game, pn: number): void {
+  const p = g.people[pn];
   if (p.retaliate >= 0) {
     const rn = p.retaliate;
     const r = g.people[rn];
@@ -352,8 +407,19 @@ function step_boundary_remake(g: Game, p: Person): void {
   if (p.target_pn >= 0 && p.leash && Math.abs(p.cx - p.anchor_x) + Math.abs(p.cy - p.anchor_y) > LEASH_RANGE) {
     p.leash = false;
     p.target_pn = -1;
-    p.dest_sx = p.anchor_x;
-    p.dest_sy = p.anchor_y;
+    p.dest_sx = p.amove ? p.goal_x : p.anchor_x;
+    p.dest_sy = p.amove ? p.goal_y : p.anchor_y;
+    return;
+  }
+  // 进攻移动：路上发现附近的敌人就去打，追击范围从这里算起
+  if (p.amove && p.target_pn < 0) {
+    const t = pick_enemy(g, pn, AMOVE_RANGE);
+    if (t >= 0) {
+      p.leash = true;
+      p.anchor_x = p.cx;
+      p.anchor_y = p.cy;
+      p.target_pn = t;
+    }
   }
 }
 
@@ -460,7 +526,9 @@ function fighting(g: Game, pn: number): void {
         p.fs = 3;
         p.cnt = 10;
         if (!target_exist(g, pn, t)) return;
-        if (random(g.rng) * 10 < 5) {
+        // 命中率 50%；"校园战争"规则下精灵更难打中
+        const missBelow = remake(g) ? 10 * (1 - TRAIT_HIT_TAKEN[tp.col]) : 5;
+        if (random(g.rng) * 10 < missBelow) {
           g.events.push({ kind: 'miss', pn: t, px: tp.px, py: tp.py });
           return;
         }

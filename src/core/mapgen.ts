@@ -11,6 +11,7 @@ export function emptyPerson(): Person {
     hx: [], hy: [], hc: 0, bx: 0, by: 0, area_num: -1,
     donothing: NaN,
     uid: -1, ordered: false, leash: false, anchor_x: 0, anchor_y: 0, retaliate: -1, task: 0, task_area: -1,
+    stuck: 0, amove: false, goal_x: 0, goal_y: 0,
   };
 }
 

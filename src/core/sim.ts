@@ -46,15 +46,23 @@ export function applyCommand(g: Game, c: Command): void {
   }
   // "校园战争"规则：多人前往同一格时各占一个小格，人多就溢出到相邻格
   const cells = remake && c.target < 0 && units.length > 1 ? spreadCells(g, c.bx, c.by, units.length) : null;
+  // 进攻移动：不算"执行指令"，挨打会还手，路上遇敌会去打（unit.ts step_boundary_remake）
+  const amove = remake && !!c.amove && c.target < 0;
   units.forEach((i, k) => {
     const p = g.people[i];
     if (remake) {
-      p.ordered = true;
+      p.ordered = !amove;
       p.leash = false;
       p.retaliate = -1;
+      p.amove = false;
     }
     if (cells) walk_to_cell(g, i, cells[k][0], cells[k][1]);
     else start_walk(g, i, c.bx, c.by, c.target);
+    if (amove) {
+      p.amove = true;
+      p.goal_x = p.dest_sx;
+      p.goal_y = p.dest_sy;
+    }
   });
 }
 

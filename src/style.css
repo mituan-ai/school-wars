@@ -29,7 +29,8 @@ body {
   position: absolute;
   inset: 0;
   display: block;
-  background: linear-gradient(180deg, #04060d 0%, #0b2558 55%, #1d56b8 100%);
+  /* 校园草地；景物由画布按世界坐标绘制 */
+  background: radial-gradient(ellipse at 50% 45%, #6aa84e 0%, #5b9a44 60%, #4a873a 100%);
 }
 
 /* ---------- 按钮 ---------- */
@@ -192,6 +193,12 @@ body {
   color: var(--muted);
   margin-top: 4px;
 }
+.card-perk {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  margin-top: 2px;
+}
 .card-stats .fast {
   color: var(--accent-2);
   font-weight: 700;
@@ -266,6 +273,17 @@ body {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+/* 营地数：帐篷图标 */
+.chip .num.camp::before {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 11px;
+  margin-right: 3px;
+  vertical-align: -1px;
+  background: center / contain no-repeat
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 22'%3E%3Cpath d='M12 1 23 21h-8l-3-7-3 7H1z' fill='%23e8e2d0'/%3E%3C/svg%3E");
+}
 .chip.you {
   border-color: var(--fc);
   box-shadow: 0 0 0 1px var(--fc);
@@ -328,6 +346,10 @@ body {
 }
 .selbar.hidden {
   display: none;
+}
+.selbar.amove {
+  border-color: #ff6a5a;
+  box-shadow: 0 0 0 2px rgba(255, 106, 90, 0.35);
 }
 .sel-text {
   font-weight: 800;

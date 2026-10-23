@@ -24,7 +24,7 @@ const vsWins = new Map<string, number>();
 
 const games = Number(args[0] ?? 200);
 const maxMinutes = Number(args[1] ?? 60);
-const names = ['黑曜', '绿林', '金刚', '紫电'];
+const names = ['人族', '兽人', '矮人', '精灵'];
 
 const wins = [0, 0, 0, 0];
 let unfinished = 0;

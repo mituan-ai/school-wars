@@ -80,6 +80,7 @@ export class TitleScreen {
         pc,
         h('div', { class: 'card-name' }, factionName(col)),
         h('div', { class: 'card-trait' }, t(`faction.trait.${col}` as TextKey)),
+        settings.ruleset === 'remake' ? h('div', { class: 'card-perk' }, t(`faction.perk.${col}` as TextKey)) : null,
         h(
           'div',
           { class: 'card-stats' },
@@ -169,7 +170,7 @@ export class TitleScreen {
       c.clearRect(0, 0, p.canvas.width, p.canvas.height);
       c.setTransform(3.4, 0, 0, 3.4, 0, 0);
       const pat = p.hover ? Math.floor(now / 80) % 10 : [10, 13, 16, 14][p.col];
-      drawStudent(c, 24, 45, p.col, 0, pat);
+      drawStudent(c, 24, 47, p.col, 0, pat);
     }
   }
 }

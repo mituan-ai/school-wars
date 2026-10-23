@@ -1,8 +1,8 @@
 // 全新合成的音效（WebAudio 实时生成，不使用原版音频）。
-// 种类与原版六个音效一一对应：移动、选中、出拳、消息、倒下、取消。
+// 种类与原版六个音效一一对应：移动、选中、出拳、消息、倒下、取消；另加升级、得星两个（docs/04 §6）。
 import { settings } from '../settings.ts';
 
-export type Sfx = 'move' | 'select' | 'punch' | 'message' | 'dead' | 'cancel';
+export type Sfx = 'move' | 'select' | 'punch' | 'message' | 'dead' | 'cancel' | 'levelup' | 'star';
 
 let ctx: AudioContext | null = null;
 let noise: AudioBuffer | null = null;
@@ -86,6 +86,14 @@ export function play(name: Sfx): void {
       break;
     case 'cancel':
       tone(a, out, 'square', 440, 220, now, 0.12, 0.12);
+      break;
+    case 'levelup':
+      // 上行琶音
+      [659, 784, 988].forEach((f, i) => tone(a, out, 'triangle', f, f, now + i * 0.06, 0.16, 0.22));
+      break;
+    case 'star':
+      [784, 988, 1175, 1568].forEach((f, i) => tone(a, out, 'triangle', f, f, now + i * 0.07, 0.22, 0.24));
+      tone(a, out, 'sine', 2093, 2637, now + 0.28, 0.35, 0.12);
       break;
   }
 }

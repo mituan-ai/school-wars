@@ -53,6 +53,12 @@ export interface Person {
   /** 指挥官分配的任务与目标地块 */
   task: number;
   task_area: number;
+  /** 寻路时连续原地等待的次数 */
+  stuck: number;
+  /** 进攻移动：行进中遇敌就打，打完继续前往 (goal_x, goal_y) */
+  amove: boolean;
+  goal_x: number;
+  goal_y: number;
 }
 
 export interface Area {
@@ -145,6 +151,8 @@ export interface OrderCommand {
   bx: number;
   by: number;
   target: number;
+  /** 进攻移动（仅"校园战争"规则，且只对走向地面的指令有效） */
+  amove?: boolean;
 }
 
 /** 设置集结点（bx < 0 表示取消） */

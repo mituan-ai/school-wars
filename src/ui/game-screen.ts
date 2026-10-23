@@ -1,6 +1,8 @@
 // 对局画面：固定 18 tick/s 推进模拟，按显示器刷新率插值绘制；处理操作、HUD、菜单
 import { play } from '../audio/sfx.ts';
-import { AREA, CAPTURE_VALUE, FPS, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, TOP_RATIO } from '../core/constants.ts';
+import {
+  AREA, CAPTURE_VALUE, FPS, KILL_MHP, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, STAR_KILLS, STAR_MAX, TOP_RATIO,
+} from '../core/constants.ts';
 import { step, spadeCount } from '../core/sim.ts';
 import type { Command, Game, GameEvent } from '../core/types.ts';
 import { factionName, formatTime, t, type TextKey } from '../i18n/index.ts';
@@ -33,7 +35,7 @@ export class GameScreen {
   private cam = new Camera();
   private ip = newInterp();
   private fx: Fx = newFx();
-  private view: ViewState = { selected: new Set(), cursorTile: null, arrowPn: -1, rect: null };
+  private view: ViewState = { selected: new Set(), cursorTile: null, arrowPn: -1, rect: null, hoverPn: -1, amove: false };
   private pending: Command[] = [];
   private acc = 0;
   private last = 0;
@@ -45,7 +47,7 @@ export class GameScreen {
   private mm: MinimapRect | null = null;
   private keys = new Set<string>();
   private mouse = { x: -1, y: -1, inside: false };
-  private drag: { kind: 'select' | 'pan' | 'minimap'; sx: number; sy: number; camX: number; camY: number } | null = null;
+  private drag: { kind: 'select' | 'pan' | 'minimap'; sx: number; sy: number; camX: number; camY: number; add: boolean } | null = null;
   private resultShown = false;
   private resultAt = 0;
   private lastAutosave = 0;
@@ -289,9 +291,15 @@ export class GameScreen {
       case 'recovered':
         this.showBanner(t('msg.recovered', { name: factionName(e.col) }), false);
         break;
-      case 'levelup':
-        this.fx.levelups.push({ pn: e.pn, t0: now });
+      case 'levelup': {
+        const p = g.people[e.pn];
+        const remake = g.rules.ruleset === 'remake';
+        const star = remake && p.lev % STAR_KILLS === 0 && p.lev / STAR_KILLS <= STAR_MAX;
+        this.fx.levelups = this.fx.levelups.filter((f) => f.pn !== e.pn);
+        this.fx.levelups.push({ pn: e.pn, t0: now, gain: remake ? KILL_MHP : 1, star });
+        if (this.cam.inside(p.px, p.py)) play(star ? 'star' : 'levelup');
         break;
+      }
       case 'annihilated': {
         let text = t('msg.annihilated', { name: factionName(e.col) });
         if (e.result === 'win') text = t('msg.win');
@@ -389,19 +397,25 @@ export class GameScreen {
 
   // ---- 选择与下令 ----
 
-  /** 原版 get_pointed_pn：取命中框内、画面最靠前的单位。own=false 时排除己方 */
-  private pointedUnit(wx: number, wy: number, own: boolean): number {
+  /**
+   * 鼠标所指的单位：命中框内离鼠标最近的那个（以身体中心计），距离相同取画面靠前的。
+   * who：'own' 只找己方，'enemy' 只找敌方，'any' 都找
+   */
+  private pointedUnit(wx: number, wy: number, who: 'own' | 'enemy' | 'any'): number {
     const g = this.game;
     let pn = -1;
-    let maxY = -Infinity;
+    let best = Infinity;
     for (let i = 0; i < PMAX; i++) {
       const p = g.people[i];
       if (p.stat <= PS.DEAD) continue;
-      if (!own && p.col === g.user_col) continue;
+      if (who === 'own' && p.col !== g.user_col) continue;
+      if (who === 'enemy' && p.col === g.user_col) continue;
       const [px, py] = unitPos(g, this.ip, i);
-      if (py >= maxY && wx >= px - 12 && wx < px + 12 && wy >= py - 32 && wy < py + 12) {
+      if (wx < px - 12 || wx >= px + 12 || wy < py - 34 || wy >= py + 10) continue;
+      const d = Math.hypot(wx - px, (wy - (py - 13)) * 0.8) - py * 1e-4;
+      if (d < best) {
+        best = d;
         pn = i;
-        maxY = py;
       }
     }
     return pn;
@@ -414,19 +428,26 @@ export class GameScreen {
   private updateHover(): void {
     this.view.cursorTile = null;
     this.view.arrowPn = -1;
-    if (!this.mouse.inside || this.view.selected.size === 0 || this.drag || this.menuOpen) return;
+    this.view.hoverPn = -1;
+    if (this.view.selected.size === 0) this.view.amove = false;
+    if (!this.mouse.inside || this.drag || this.menuOpen) return;
     if (this.inMinimap(this.mouse.x, this.mouse.y)) return;
     const [wx, wy] = this.cam.toWorld(this.mouse.x, this.mouse.y);
-    const target = this.pointedUnit(wx, wy, false);
+    // 悬停的己方学生描一圈细边：点下去就选中它
+    if (this.game.user_col < 4) this.view.hoverPn = this.pointedUnit(wx, wy, 'own');
+    if (this.view.selected.size === 0) return;
+    const target = this.pointedUnit(wx, wy, 'enemy');
     if (target >= 0) this.view.arrowPn = target;
     else this.view.cursorTile = this.tileAt(wx, wy);
   }
 
   private issueOrder(sx: number, sy: number): void {
     const [wx, wy] = this.cam.toWorld(sx, sy);
-    const target = this.pointedUnit(wx, wy, false);
+    const target = this.pointedUnit(wx, wy, 'enemy');
     const tile = this.tileAt(wx, wy);
-    this.pending.push({ type: 'order', units: [...this.view.selected], bx: tile.bx, by: tile.by, target });
+    const amove = this.view.amove && target < 0;
+    this.view.amove = false;
+    this.pending.push({ type: 'order', units: [...this.view.selected], bx: tile.bx, by: tile.by, target, amove });
     this.fx.blink = { bx: tile.bx, by: tile.by, pn: target, t0: performance.now() };
     play('move');
     if (settings.controls === 'classic') this.cancelSelection(false);
@@ -436,6 +457,60 @@ export class GameScreen {
     if (withSound && (this.view.selected.size || this.view.baseSelected)) play('cancel');
     this.view.selected.clear();
     this.view.baseSelected = false;
+    this.view.amove = false;
+  }
+
+  /**
+   * 撤退回血：选中的人各自走向最近的己方泉水或未沦陷的本部；没选人时撤回所有生命不到一半的人。
+   * 只是替玩家下几道普通移动指令。
+   */
+  private retreat(): void {
+    const g = this.game;
+    const me = g.user_col;
+    if (me >= 4 || !g.player[me].exist) return;
+    let units = [...this.view.selected];
+    if (units.length === 0) {
+      for (let i = 0; i < PMAX; i++) {
+        const p = g.people[i];
+        if (p.stat > PS.DEAD && p.col === me && p.hp < p.mhp * 0.5) units.push(i);
+      }
+    }
+    units = units.filter((pn) => g.people[pn].stat > PS.DEAD);
+    const spots = g.area.filter((a) => a.col === me && (a.areatype === AREA.HEART || (a.areatype === AREA.BASE && !a.fallen)));
+    if (units.length === 0 || spots.length === 0) {
+      this.showBanner(t(spots.length ? 'hud.retreat.none' : 'hud.retreat.nospot'), false, true);
+      return;
+    }
+    const byTile = new Map<number, number[]>();
+    for (const pn of units) {
+      const p = g.people[pn];
+      let best = spots[0];
+      let bd = Infinity;
+      for (const a of spots) {
+        const d = Math.abs(p.cx - (a.bx * 4 + 1.5)) + Math.abs(p.cy - (a.by * 4 + 1.5));
+        if (d < bd) {
+          bd = d;
+          best = a;
+        }
+      }
+      const key = best.by * 16 + best.bx;
+      byTile.set(key, [...(byTile.get(key) ?? []), pn]);
+    }
+    for (const [key, list] of byTile) this.pending.push({ type: 'order', units: list, bx: key % 16, by: Math.floor(key / 16), target: -1 });
+    play('move');
+    this.showBanner(t('hud.retreat', { n: units.length }), false, true);
+  }
+
+  /** 选中全部生命不到一半的己方学生 */
+  private selectWounded(): void {
+    const g = this.game;
+    this.view.selected.clear();
+    this.view.baseSelected = false;
+    for (let i = 0; i < PMAX; i++) {
+      const p = g.people[i];
+      if (p.stat > PS.DEAD && p.col === g.user_col && p.hp < p.mhp * 0.5) this.view.selected.add(i);
+    }
+    if (this.view.selected.size) play('select');
   }
 
   /** 只有"校园战争"规则有集结点 */
@@ -496,13 +571,24 @@ export class GameScreen {
     if (this.view.selected.size) play('select');
   }
 
-  private finishSelect(x1: number, y1: number, x2: number, y2: number): void {
+  /** add：按住 Shift，点击加入 / 移出选择，拖框追加选择 */
+  private finishSelect(x1: number, y1: number, x2: number, y2: number, add: boolean): void {
     const g = this.game;
-    const sel = new Set<number>();
+    const sel = new Set<number>(add ? this.view.selected : []);
     this.view.baseSelected = false;
+    this.view.amove = false;
     if (Math.abs(x2 - x1) < 4 && Math.abs(y2 - y1) < 4) {
       const [wx, wy] = this.cam.toWorld(x2, y2);
-      const pn = this.pointedUnit(wx, wy, true);
+      const pn = this.pointedUnit(wx, wy, 'own');
+      if (add) {
+        if (pn >= 0) {
+          if (sel.has(pn)) sel.delete(pn);
+          else sel.add(pn);
+          play('select');
+        }
+        this.view.selected = sel;
+        return;
+      }
       const now = performance.now();
       const pl = g.player[g.user_col];
       if (pl && this.isOwnBase({ bx: pl.basex, by: pl.basey }) && hitSchool(pl.basex, pl.basey, wx, wy)) {
@@ -512,7 +598,7 @@ export class GameScreen {
         play('select');
         return;
       }
-      if (pn >= 0 && g.people[pn].col === g.user_col) {
+      if (pn >= 0) {
         if (this.lastClick.pn === pn && now - this.lastClick.t < DOUBLE_MS) {
           // 双击：选中屏幕内全部己方学生
           for (let i = 0; i < PMAX; i++) {
@@ -562,30 +648,32 @@ export class GameScreen {
     const x = e.offsetX;
     const y = e.offsetY;
     if (e.button === 2) {
+      if (this.inMinimap(x, y)) return;
       if (this.view.selected.size) this.issueOrder(x, y);
       else if (this.view.baseSelected) this.setRally(x, y);
       return;
     }
     if (e.button === 1) {
       e.preventDefault();
-      this.drag = { kind: 'pan', sx: x, sy: y, camX: this.cam.x, camY: this.cam.y };
+      this.drag = { kind: 'pan', sx: x, sy: y, camX: this.cam.x, camY: this.cam.y, add: false };
       return;
     }
     if (e.button !== 0) return;
     if (this.inMinimap(x, y)) {
-      this.drag = { kind: 'minimap', sx: x, sy: y, camX: 0, camY: 0 };
+      this.drag = { kind: 'minimap', sx: x, sy: y, camX: 0, camY: 0, add: false };
       this.moveToMinimap(x, y);
       return;
     }
     if (this.keys.has(' ')) {
-      this.drag = { kind: 'pan', sx: x, sy: y, camX: this.cam.x, camY: this.cam.y };
+      this.drag = { kind: 'pan', sx: x, sy: y, camX: this.cam.x, camY: this.cam.y, add: false };
       return;
     }
-    if (settings.controls === 'classic' && this.view.selected.size) {
+    // 按过 A 之后左键也能下进攻移动（与常见即时战略游戏一致）
+    if ((settings.controls === 'classic' || this.view.amove) && this.view.selected.size) {
       this.issueOrder(x, y);
       return;
     }
-    this.drag = { kind: 'select', sx: x, sy: y, camX: 0, camY: 0 };
+    this.drag = { kind: 'select', sx: x, sy: y, camX: 0, camY: 0, add: e.shiftKey };
   };
 
   private onMouseMove = (e: MouseEvent): void => {
@@ -610,7 +698,7 @@ export class GameScreen {
     if (!d || (e.button !== 0 && e.button !== 1)) return;
     this.drag = null;
     this.view.rect = null;
-    if (d.kind === 'select') this.finishSelect(d.sx, d.sy, this.mouse.x, this.mouse.y);
+    if (d.kind === 'select') this.finishSelect(d.sx, d.sy, this.mouse.x, this.mouse.y, d.add);
   };
 
   private onKeyDown = (e: KeyboardEvent): void => {
@@ -629,12 +717,23 @@ export class GameScreen {
       return;
     }
     if (k === 'escape') {
-      if (this.view.selected.size || this.view.baseSelected) this.cancelSelection(true);
+      if (this.view.amove) this.view.amove = false;
+      else if (this.view.selected.size || this.view.baseSelected) this.cancelSelection(true);
       else this.openPause();
       return;
     }
     if (k === 'p') {
       this.openPause();
+      return;
+    }
+    if (k === 'h' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (e.shiftKey) this.selectWounded();
+      else this.retreat();
+      return;
+    }
+    // 有选中的人时，A 键准备进攻移动（不再滚动镜头）；再点一次地面下令
+    if (k === 'a' && this.view.selected.size && this.game.rules.ruleset === 'remake' && !e.ctrlKey && !e.metaKey) {
+      if (!e.repeat) this.view.amove = !this.view.amove;
       return;
     }
     if (k === '+' || k === '=') this.cam.zoom *= 1.15;
@@ -679,7 +778,7 @@ export class GameScreen {
     for (let c = 0; c < 4; c++) {
       parts.push(`${g.player[c].exist}|${g.player[c].people_cnt}|${spadeCount(g, c)}|${g.top === c}`);
     }
-    const key = parts.join(',') + `|${this.view.selected.size}|${this.view.baseSelected}|${settings.controls}|${Math.floor(g.tick / FPS)}|${settings.lang}`;
+    const key = parts.join(',') + `|${this.view.selected.size}|${this.view.baseSelected}|${this.view.amove}|${settings.controls}|${Math.floor(g.tick / FPS)}|${settings.lang}`;
     if (key === this.hudCache) return;
     this.hudCache = key;
     for (let c = 0; c < 4; c++) {
@@ -693,7 +792,7 @@ export class GameScreen {
         h('span', { class: 'name' }, factionName(c, true)),
         c === g.user_col ? h('span', { class: 'you-tag' }, t('hud.you')) : null,
         h('span', { class: 'num' }, t('hud.count', { n: pl.people_cnt })),
-        h('span', { class: 'num' }, `♠${spadeCount(g, c)}`),
+        h('span', { class: 'num camp', title: t('hud.camps') }, String(spadeCount(g, c))),
         g.top === c ? h('span', { class: 'top-tag' }, t('hud.top')) : null,
       ];
       chip.replaceChildren(...parts.filter((x): x is HTMLElement => x !== null));
@@ -703,11 +802,18 @@ export class GameScreen {
     const base = !!this.view.baseSelected;
     this.hud.selbar.classList.toggle('hidden', n === 0 && !base);
     this.hud.selText.textContent = base ? t('hud.base.selected') : t('hud.selected', { n });
-    this.hud.selHint.textContent = base ? t('hud.base.hint') : settings.controls === 'classic' ? t('hud.hint.classic') : t('hud.hint.modern');
+    this.hud.selHint.textContent = base
+      ? t('hud.base.hint')
+      : this.view.amove
+        ? t('hud.hint.amove')
+        : settings.controls === 'classic'
+          ? t('hud.hint.classic')
+          : t(this.game.rules.ruleset === 'remake' ? 'hud.hint.remake' : 'hud.hint.modern');
+    this.hud.selbar.classList.toggle('amove', this.view.amove);
     this.updatePower();
   }
 
-  /** 势力比例条：与"众矢之的"的判定口径相同（人数 + ♠，绿林减半），标出 40% 线 */
+  /** 势力比例条：与"众矢之的"的判定口径相同（人数 + 营地，兽人减半），标出 40% 线 */
   private updatePower(): void {
     const g = this.game;
     const v = [0, 0, 0, 0];
@@ -733,7 +839,7 @@ export class GameScreen {
     let lines: string[] = [];
     if (this.mouse.inside && !this.drag && !this.menuOpen && !this.inMinimap(this.mouse.x, this.mouse.y)) {
       const [wx, wy] = this.cam.toWorld(this.mouse.x, this.mouse.y);
-      const pn = this.pointedUnit(wx, wy, true);
+      const pn = this.pointedUnit(wx, wy, 'any');
       if (pn >= 0) {
         const p = g.people[pn];
         lines = [t('hover.unit', { name: factionName(p.col, true), hp: Math.ceil(p.hp), mhp: p.mhp, kills: p.lev })];

@@ -79,11 +79,27 @@ export const LEASH_RANGE = 12;
 /** 击倒对手：回复最大生命的比例、生命上限增加量 */
 export const KILL_HEAL = 0.3;
 export const KILL_MHP = 2;
-/** "校园战争"规则的阵营数值（按锦标赛结果调整，docs/03 §2.3） */
+/** "校园战争"规则的阵营数值（按锦标赛结果调整，docs/03 §2.3；加入种族特性后重调，docs/04 §3） */
 export const REMAKE_APPEAR = [1500, 500, 1500, 1500];
-export const REMAKE_HP = [18, 12, 28, 14];
+export const REMAKE_HP = [17, 12, 28, 12];
 export const REMAKE_PUNCH = [4, 4, 3, 5];
 
 /** 每多少次击倒得一颗星，最多几颗 */
 export const STAR_KILLS = 3;
 export const STAR_MAX = 3;
+
+// ---- v0.2 体验升级（docs/04_体验升级方案.md）----
+
+/**
+ * 种族特性（仅"校园战争"规则，docs/04 §3）。0 人族、1 兽人、2 矮人、3 精灵。
+ * 占领 / 攻陷 / 夺回的推进倍率（人族"团结"）、坐下回血倍率（矮人"皮实"）、被打中的概率（精灵"灵巧"）。
+ * 兽人的"人海"就是 REMAKE_APPEAR 里更短的增援间隔。
+ */
+export const TRAIT_CAPTURE = [1.3, 1, 1, 1];
+export const TRAIT_HEAL = [1, 1, 2, 1];
+export const TRAIT_HIT_TAKEN = [0.5, 0.5, 0.5, 0.42];
+
+/** 寻路：下一格暂时有人时最多原地等几次 */
+export const STUCK_TRIES = 5;
+/** 进攻移动：行进中发现多少小格内的敌人就去打 */
+export const AMOVE_RANGE = 6;

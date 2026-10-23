@@ -6,7 +6,7 @@
 
 简体中文 | [English](README.en.md)
 
-[![在线试玩](https://img.shields.io/badge/在线试玩-schoolwars.yhdmt.site-e8513f?style=flat-square)](http://schoolwars.yhdmt.site)
+[![在线试玩](https://img.shields.io/badge/在线试玩-schoolwars.yhdmt.site-e8513f?style=flat-square)](https://schoolwars.yhdmt.site)
 [![版本](https://img.shields.io/badge/版本-v0.1.0-3fb35e?style=flat-square)](https://github.com/mituan-ai/school-wars/releases)
 [![许可证](https://img.shields.io/badge/许可证-MIT-blue?style=flat-square)](LICENSE)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white)

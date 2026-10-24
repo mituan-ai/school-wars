@@ -3,16 +3,17 @@
 //   PLAYWRIGHT_CORE=<playwright-core 的 index.mjs> [CHROME=<浏览器路径>] node tests/e2e/online.mjs <server|host> <截图目录> [4] [reload]
 // 第三个参数为 4：四名玩家（否则三名玩家 + 一台困难电脑）；玩家主机模式下 Cat 强制中转（?relay=1），Dan 加 40 ms 延迟。
 // server：之后刷新一名玩家的页面、让一名玩家断网 25 秒；host：之后关闭房主页面（带 reload 则改为刷新房主页面）。
+// 也可以测线上站点：BASE=https://… [PROXY=socks5://127.0.0.1:7890]。
 // 期望：每次 "hash check" 都是 0 mismatches，退出码 0。
 const { chromium } = await import(process.env.PLAYWRIGHT_CORE ?? 'playwright-core');
 
-const BASE = 'http://localhost:5173/';
+const BASE = process.env.BASE ?? 'http://localhost:5173/';
 const MODE = process.argv[2] ?? 'server';
 const OUT = process.argv[3] ?? '.';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(`[${(performance.now() / 1000).toFixed(1)}s]`, ...a);
 
-const browser = await chromium.launch({ executablePath: process.env.CHROME || undefined, args: ['--disable-features=WebRtcHideLocalIpsWithMdns', '--autoplay-policy=no-user-gesture-required'] });
+const browser = await chromium.launch({ executablePath: process.env.CHROME || undefined, proxy: process.env.PROXY ? { server: process.env.PROXY } : undefined, args: ['--disable-features=WebRtcHideLocalIpsWithMdns', '--autoplay-policy=no-user-gesture-required'] });
 
 async function newPage(name, query = '') {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' });
@@ -28,7 +29,18 @@ async function newPage(name, query = '') {
 /** 页面里：记录每 90 帧确认状态的指纹；随机给自己的学生下令 */
 async function instrument(page) {
   await page.evaluate(async () => {
-    const { hashGame } = await import('/src/core/save.ts');
+    // 开发服务器上用核心自己的指纹；线上构建里没有源码模块，退回到"所有学生位置、血量、状态 + 各校数据"的摘要
+    let hashGame;
+    try {
+      ({ hashGame } = await import('/src/core/save.ts'));
+    } catch {
+      hashGame = (g) => {
+        const text = JSON.stringify([g.tick, g.people.map((p) => [p.stat, p.col, p.px, p.py, p.hp]), g.player]);
+        let h = 2166136261;
+        for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+        return (h >>> 0).toString(16) + ':' + text.length;
+      };
+    }
     const w = window;
     w.__hashes = w.__hashes ?? {};
     const hook = () => {
@@ -96,7 +108,21 @@ async function hashesOf(pages) {
 }
 
 async function waitGame(page, ms = 30000) {
-  await page.waitForFunction(() => !!window.__sw?.net, null, { timeout: ms });
+  try {
+    await page.waitForFunction(() => !!window.__sw?.net, null, { timeout: ms });
+  } catch (e) {
+    const d = await page.evaluate(() => {
+      const o = window.__online;
+      const s = o?.game;
+      return {
+        status: o?.status, room: o?.room?.status, host: o?.room?.host === o?.id, game: !!s, hosting: s?.hosting,
+        link: s?.client.linkKind, confirmed: s?.client.confirmed?.tick ?? null, held: s?.client.held,
+        peers: o ? [...o.peers.values()].map((p) => p.via) : null,
+      };
+    });
+    log(page.label, 'not in game:', JSON.stringify(d));
+    throw e;
+  }
 }
 
 // ---- 建房 ----

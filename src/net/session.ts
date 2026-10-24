@@ -489,7 +489,8 @@ export class NetSession {
 
   private watch(): void {
     if (this.disposed || this.authority || !this.client.connected) return;
-    if (this.client.heartbeat(performance.now()) > SILENT_MS) this.connectToAuthority();
+    const now = performance.now();
+    if (this.client.heartbeat(now) > SILENT_MS || this.client.stale(now)) this.connectToAuthority();
   }
 
   private scheduleReconnect(): void {

@@ -195,6 +195,50 @@ describe('联机同步：服务器模式（往返 220 ms，抖动 ±30 ms）', (
     expect(clients[0].heartbeat(clock.t)).toBeGreaterThan(5_000);
   });
 
+  it('sync 在权威建好之前就到了、被丢掉：客户端几秒内重发，正常进入对局', () => {
+    const clock = new SimClock();
+    const auth = new Authority({ game: mpGame(5, [...AI]), sched: clock, dropAi: 'normal', humanSeats: HUMANS, waitFor: [0] });
+    const [a, b] = linkPair(clock, 'direct', 1);
+    const c = new NetClient({ seat: 0, sched: clock });
+    c.attach(b); // 对面还没有权威：这条 sync 没人处理
+    clock.run(100, 10, () => {});
+    auth.attach(a, 0); // 权威建好了，之后的 ping 都有 pong
+    const watch = () => {
+      auth.pump();
+      if (c.heartbeat(clock.t) > 5000 || c.stale(clock.t)) c.attach(b);
+    };
+    clock.run(2500, 10, watch);
+    expect(c.confirmed).toBeNull();
+    expect(c.heartbeat(clock.t)).toBeLessThan(2000);
+    clock.run(5000, 10, watch);
+    expect(c.confirmed).not.toBeNull();
+    expect(c.confirmed!.tick).toBeGreaterThan(0);
+    expect(c.stats().resyncs).toBe(0);
+  });
+
+  it('开局时权威在等人，客户端重发 sync 换来的第二份快照不算纠正', () => {
+    const clock = new SimClock();
+    const auth = new Authority({ game: mpGame(6, [...AI]), sched: clock, dropAi: 'normal', humanSeats: HUMANS, waitFor: [0, 1] });
+    const [a0, b0] = linkPair(clock, 'relay', 200);
+    const [a1, b1] = linkPair(clock, 'direct', 5);
+    auth.attach(a0, 0);
+    auth.attach(a1, 1);
+    const c0 = new NetClient({ seat: 0, sched: clock });
+    const c1 = new NetClient({ seat: 1, sched: clock });
+    c0.attach(b0);
+    const watch = () => {
+      auth.pump();
+      if (c0.stale(clock.t)) c0.attach(b0);
+    };
+    // 座位 1 还没来，权威不发状态；约 3 秒时 c0 重发 sync（单程 200 ms）。
+    // 座位 1 恰好在这条 sync 路上时到齐：权威恢复时发一份快照，随后到达的 sync 又换来一份
+    clock.run(3050, 10, watch);
+    c1.attach(b1);
+    clock.run(10_000, 10, watch);
+    expect(c0.confirmed).not.toBeNull();
+    expect(c0.stats().resyncs).toBe(0);
+  });
+
   it('主动离开的座位立即由电脑接管', () => {
     const { clock, auth, clients } = setup();
     clock.run(5_000, 1000 / 30, loop(clock, auth, clients, []));

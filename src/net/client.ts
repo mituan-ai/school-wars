@@ -15,6 +15,8 @@ import {
 const KEY_EVENTS = new Set<GameEvent['kind']>(['fallen', 'recovered', 'annihilated', 'capture']);
 const TAIL_KEEP = 400;
 const PING_MS = 1000;
+/** 接上链路后这么久还没收到状态，就重发 sync */
+const RESYNC_MS = 3000;
 /** 纠正偏移的衰减时间常数（ms） */
 const SMOOTH_MS = 90;
 
@@ -80,6 +82,8 @@ export class NetClient {
   private lastPing = -Infinity;
   /** 最近一次收到权威消息的时间 */
   private lastHeard = -Infinity;
+  /** 最近一次接上链路（发出 sync）的时间 */
+  private attachedAt = -Infinity;
   private lateBoost = 0;
   private lastX = -Infinity;
   // 画面
@@ -97,6 +101,8 @@ export class NetClient {
   private fxOut: GameEvent[] = [];
   private keyOut: GameEvent[] = [];
   private expectSnap = true;
+  /** 同一条链路上没有状态时重发过几次 sync：每次都会换来一份快照，这些不算纠正 */
+  private snapsDue = 0;
   private st = { late: 0, resyncs: 0, confirmMs: 0, ahead: 0, stalled: false };
 
   constructor(o: ClientOptions) {
@@ -117,6 +123,7 @@ export class NetClient {
 
   /** 接上（或换到）一条通往权威的链路：报告已确认到哪一帧，重发尚未确认的指令 */
   attach(link: Link): void {
+    this.snapsDue = (link === this.link ? this.snapsDue : 0) + (this.confirmed ? 0 : 1);
     this.link = link;
     link.onMessage = (m) => this.onMessage(m as ToClient);
     link.onClose = () => {
@@ -131,6 +138,7 @@ export class NetClient {
     this.lastX = -Infinity;
     this.lastPing = -Infinity;
     this.lastHeard = this.sched.now();
+    this.attachedAt = this.lastHeard;
     this.pings.clear();
     this.expectSnap = true;
     this.send({ t: 'sync', f: this.confirmed ? this.confirmed.tick : -1, tail: this.tail.slice(-120), pend: this.pending });
@@ -189,6 +197,14 @@ export class NetClient {
   heartbeat(now: number): number {
     if (now - this.lastPing >= PING_MS) this.ping(now);
     return now - this.lastHeard;
+  }
+
+  /**
+   * 接上链路后迟迟没收到状态（快照或帧）：sync 多半丢了，比如成员的 sync 经直连先到，
+   * 房主那边还没建好权威。权威照样回 pong，所以光看"有没有消息"发现不了
+   */
+  stale(now: number): boolean {
+    return this.expectSnap && now - this.attachedAt > RESYNC_MS;
   }
 
   /** 每帧调用：返回要画的状态 */
@@ -290,8 +306,9 @@ export class NetClient {
     } catch {
       return;
     }
-    // 接上链路后的第一条快照是开局 / 重连；之后再来的快照都是指纹不一致后的纠正
-    if (!this.expectSnap) this.st.resyncs++;
+    // 接上链路后的快照是开局 / 重连（重发 sync 换来的也是）；之后再来的快照都是指纹不一致后的纠正
+    if (this.snapsDue > 0) this.snapsDue--;
+    else if (!this.expectSnap) this.st.resyncs++;
     this.expectSnap = false;
     this.confirmed = g;
     for (let i = 0; i < PMAX; i++) {

@@ -4,7 +4,7 @@
 // 四个种族共用一套骨架和立领校服，区别在体型、肤色和头部（docs/04 §3）。
 import { FACTION, HAIR, HAIR_DARK, HAIR_LIGHT, OUTLINE, SKIN, SKIN_DARK } from './palette.ts';
 
-type P = [number, number];
+export type P = [number, number];
 
 interface Pose {
   lean: number;
@@ -19,7 +19,7 @@ interface Pose {
   alpha: number;
 }
 
-function pose(pat: number): Pose {
+export function pose(pat: number): Pose {
   const base: Pose = {
     lean: 0,
     drop: 0,
@@ -159,7 +159,7 @@ interface Race {
   hunch: number;
 }
 
-const RACE: Race[] = [
+export const RACE: Race[] = [
   { body: [1, 1], skin: SKIN, skinDark: SKIN_DARK, hunch: 0 }, // 人族：原版的飞机头不良少年
   { body: [1.08, 0.97], skin: '#b2c96e', skinDark: '#7c9442', hunch: 0.07 }, // 兽人：橄榄色皮肤，和绿校服区分开
   { body: [1.22, 0.8], skin: '#f2b48c', skinDark: '#c9845c', hunch: 0 }, // 矮人

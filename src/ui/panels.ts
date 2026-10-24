@@ -157,6 +157,7 @@ export function openSettings(onChange: () => void, onClose?: () => void): void {
       h('div', { class: 'setting-row' }, h('span', {}, t('settings.lang')), h('div', { class: 'seg' }, langBtn('zh', '中文'), langBtn('en', 'English'))),
       h('div', { class: 'setting-block' }, h('div', { class: 'setting-label' }, t('settings.rules')), rulesBtn('remake'), rulesBtn('classic')),
       h('div', { class: 'setting-row' }, h('span', {}, t('settings.difficulty')), h('div', { class: 'seg' }, diffBtn('easy'), diffBtn('normal'), diffBtn('hard'))),
+      toggle(t('settings.fog'), () => settings.fog, (v) => (settings.fog = v)),
       h('div', { class: 'setting-block' }, h('div', { class: 'setting-label' }, t('settings.controls')), ctrlBtn('modern'), ctrlBtn('classic')),
       h('label', { class: 'setting-row' }, h('span', {}, t('settings.volume')), vol),
       toggle(t('settings.capture'), () => settings.showCapture, (v) => (settings.showCapture = v)),

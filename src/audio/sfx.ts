@@ -1,8 +1,8 @@
 // 全新合成的音效（WebAudio 实时生成，不使用原版音频）。
-// 种类与原版六个音效一一对应：移动、选中、出拳、消息、倒下、取消；另加升级、得星两个（docs/04 §6）。
+// 种类与原版六个音效一一对应：移动、选中、出拳、消息、倒下、取消；另加升级、得星两个（docs/04 §6），下课铃（docs/06 §5）。
 import { settings } from '../settings.ts';
 
-export type Sfx = 'move' | 'select' | 'punch' | 'message' | 'dead' | 'cancel' | 'levelup' | 'star';
+export type Sfx = 'move' | 'select' | 'punch' | 'message' | 'dead' | 'cancel' | 'levelup' | 'star' | 'bell';
 
 let ctx: AudioContext | null = null;
 let noise: AudioBuffer | null = null;
@@ -94,6 +94,14 @@ export function play(name: Sfx): void {
     case 'star':
       [784, 988, 1175, 1568].forEach((f, i) => tone(a, out, 'triangle', f, f, now + i * 0.07, 0.22, 0.24));
       tone(a, out, 'sine', 2093, 2637, now + 0.28, 0.35, 0.12);
+      break;
+    case 'bell':
+      // 学校电铃：两个音交替响几下
+      for (let i = 0; i < 6; i++) {
+        const f = i % 2 ? 1046 : 1318;
+        tone(a, out, 'sine', f, f, now + i * 0.11, 0.3, 0.2);
+        tone(a, out, 'triangle', f * 2.01, f * 2.01, now + i * 0.11, 0.12, 0.05);
+      }
       break;
   }
 }

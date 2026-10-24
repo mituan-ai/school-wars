@@ -91,6 +91,8 @@ export interface RoomInfo {
   /** 玩家主机模式下的房主（权威所在的成员） */
   host: string;
   ruleset: RuleSet;
+  /** 战争迷雾（旧服务器没有这个字段） */
+  fog?: boolean;
   /** 空座位的电脑难度 */
   ai: AiLevel[];
   /** 掉线托管用的电脑难度 */
@@ -107,6 +109,7 @@ export interface StartInfo {
   host: string;
   seed: number;
   ruleset: RuleSet;
+  fog?: boolean;
   /** 每个座位：'human' 或电脑难度 */
   ai: AiLevel[];
   dropAi: AiLevel;
@@ -121,7 +124,7 @@ export type ToServer =
   | { t: 'join'; code: string }
   | { t: 'leave' }
   | { t: 'seat'; seat: number }
-  | { t: 'config'; mode?: NetMode; ruleset?: RuleSet; ai?: AiLevel[]; dropAi?: AiLevel; host?: string }
+  | { t: 'config'; mode?: NetMode; ruleset?: RuleSet; fog?: boolean; ai?: AiLevel[]; dropAi?: AiLevel; host?: string }
   | { t: 'start' }
   | { t: 'ended' }
   /** 离开对局但留在房间里 */

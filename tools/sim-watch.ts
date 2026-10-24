@@ -1,6 +1,7 @@
 // 无头跑四 AI 观战局，输出胜者分布与对局时长。
 // 用法：npm run sim -- [局数] [最长分钟] [--rules classic|remake] [--ai classic|easy|normal|hard|黑,绿,金,紫]
 //       [--vs hard,classic]  两种 AI 各控制两所学校（每局轮换），统计胜者属于哪种 AI
+//       [--fog]  打开战争迷雾（仅校园战争规则）
 import { FPS } from '../src/core/constants.ts';
 import { createGame } from '../src/core/mapgen.ts';
 import { step } from '../src/core/sim.ts';
@@ -14,12 +15,15 @@ function flag(name: string): string | undefined {
   args.splice(i, 2);
   return v;
 }
+const fogIdx = args.indexOf('--fog');
+if (fogIdx >= 0) args.splice(fogIdx, 1);
+const fog = fogIdx >= 0;
 const ruleset = (flag('--rules') ?? 'classic') as RuleSet;
 const aiArg = (flag('--ai') ?? (ruleset === 'classic' ? 'classic' : 'normal')).split(',') as AiLevel[];
 const vs = flag('--vs')?.split(',') as AiLevel[] | undefined;
 const ai = [0, 1, 2, 3].map((i) => aiArg[i] ?? aiArg[0]);
 const rulesFor = (seed: number): Rules =>
-  vs ? { ruleset, ai: [0, 1, 2, 3].map((i) => vs[(i + (seed >> 1)) % 2 === seed % 2 ? 0 : 1]) } : { ruleset, ai };
+  vs ? { ruleset, fog, ai: [0, 1, 2, 3].map((i) => vs[(i + (seed >> 1)) % 2 === seed % 2 ? 0 : 1]) } : { ruleset, fog, ai };
 const vsWins = new Map<string, number>();
 
 const games = Number(args[0] ?? 200);

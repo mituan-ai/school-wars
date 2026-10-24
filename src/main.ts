@@ -11,6 +11,8 @@ import { TitleScreen } from './ui/title-screen.ts';
 
 const app = document.getElementById('app')!;
 setLang(settings.lang);
+// 画布上的像素字要等字体到位，否则先画出来的是系统字体
+void document.fonts?.load('12px "Fusion Pixel"').catch(() => {});
 
 let current: { destroy(): void } | null = null;
 /** 联机连接：进入联机大厅时建立，回到标题画面时关闭 */

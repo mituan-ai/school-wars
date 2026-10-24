@@ -8,7 +8,7 @@ import { remakeRules, type Game } from '../core/types.ts';
 import { factionName, t, type TextKey } from '../i18n/index.ts';
 import { Camera, newFx, newInterp, render } from '../render/renderer.ts';
 import { FACTION } from '../render/palette.ts';
-import { drawStudent } from '../render/student.ts';
+import { studentSprite } from '../render/pixel-student.ts';
 import { readSlot, slotMeta } from '../save/storage.ts';
 import { settings } from '../settings.ts';
 import { h } from './dom.ts';
@@ -64,7 +64,7 @@ export class TitleScreen {
   private build(): void {
     this.portraits = [];
     const cards = [0, 1, 2, 3].map((col) => {
-      const pc = h('canvas', { class: 'portrait', width: 168, height: 168 });
+      const pc = h('canvas', { class: 'portrait', width: 140, height: 140 });
       const entry = { canvas: pc, col, hover: false };
       this.portraits.push(entry);
       const spec = factionSpec(settings.ruleset, col);
@@ -100,7 +100,7 @@ export class TitleScreen {
       h('button', { class: 'rules-line', onClick: () => openSettings(() => this.build()) },
         settings.ruleset === 'classic'
           ? t('title.rules.classic')
-          : t('title.rules', { rules: t('rules.remake'), difficulty: t(`difficulty.${settings.difficulty}`) })),
+          : t('title.rules', { rules: t('rules.remake'), difficulty: t(`difficulty.${settings.difficulty}`) }) + (settings.fog ? t('title.rules.fog') : '')),
       h('div', { class: 'cards' }, ...cards),
       h(
         'div',
@@ -170,9 +170,14 @@ export class TitleScreen {
       const c = p.canvas.getContext('2d')!;
       c.setTransform(1, 0, 0, 1, 0, 0);
       c.clearRect(0, 0, p.canvas.width, p.canvas.height);
-      c.setTransform(3.4, 0, 0, 3.4, 0, 0);
+      c.imageSmoothingEnabled = false;
+      // 像素精灵放大 4 倍：一个美术像素正好 4 个画布像素
       const pat = p.hover ? Math.floor(now / 80) % 10 : [10, 13, 16, 14][p.col];
-      drawStudent(c, 24, 47, p.col, 0, pat);
+      const s = studentSprite(p.col, 0, pat);
+      c.fillStyle = 'rgba(0,0,0,0.3)';
+      c.fillRect(70 - 20, 130, 40, 4);
+      c.fillRect(70 - 16, 126, 32, 12);
+      c.drawImage(s.canvas, 70 - s.ax * 4, 132 - s.ay * 4, s.canvas.width * 4, s.canvas.height * 4);
     }
   }
 }

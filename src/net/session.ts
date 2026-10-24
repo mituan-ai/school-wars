@@ -559,7 +559,7 @@ export class NetSession {
     let log;
     let waitFor: number[];
     if (fresh || !this.client.confirmed) {
-      game = createGame({ seed: info.seed, userCol: 4, rules: { ruleset: info.ruleset, ai: info.ai.slice() } });
+      game = createGame({ seed: info.seed, userCol: 4, rules: { ruleset: info.ruleset, ai: info.ai.slice(), fog: !!info.fog } });
       log = undefined;
       waitFor = info.seats.flatMap((s, c) => (s ? [c] : []));
     } else {

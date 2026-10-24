@@ -1,18 +1,31 @@
-// 画面绘制：Canvas 2D。世界坐标与原版 mcStage 内坐标一致（大格菱形 96×48，小格 24×12）。
-// 分层：校园景物 → 操场 → 地面（地块、光标、行进路线）→ 按深度排序的学生与立体物件 → 特效 → 屏幕空间（框选、小地图）
+// 画面绘制：Canvas 2D，像素风（docs/06 §7）。世界坐标与原版 mcStage 内坐标一致（大格菱形 96×48，小格 24×12）。
+// 整个世界先画在一张低分辨率的美术画布上（1 美术像素 = 2 世界单位，精灵都对齐像素格），
+// 再按最近邻放大到不超过目标倍率的整数倍，最后用双线性缩放到任意倍率——缩放可以随意，像素仍然方正。
+// 分层：背景（草地、操场、景物）→ 地面层（地盘、涂色、迷雾）→ 地块标记、路线 → 按深度排序的学生与物件 → 特效 → 屏幕空间（框选、小地图）
 import { AREA, BSIZE, CAPTURE_VALUE, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, SSIZE } from '../core/constants.ts';
 import { factionSpec, stars } from '../core/query.ts';
+import { isLeader } from '../core/squad.ts';
 import type { Area, Game } from '../core/types.ts';
 import { getLang, t } from '../i18n/index.ts';
 import { settings } from '../settings.ts';
-import { FACTION, NEUTRAL } from './palette.ts';
-import { drawOutlined } from './outline.ts';
-import { drawScenery, schoolYard } from './scenery.ts';
-import { drawStudent, drawStudentShadow } from './student.ts';
+import { BACK_X0, BACK_Y0, backdrop } from './backdrop.ts';
+import { FOG, type FogView } from './fogview.ts';
+import { BOARD_H, BOARD_W, schoolAnchor, SCHOOL_D, SCHOOL_H, SCHOOL_W, tileCenter, worldToCell } from './geom.ts';
+import { GroundLayer } from './ground.ts';
+import { FACTION } from './palette.ts';
+import { ART, blit, pxDiamond, pxDiamondEdge, pxRect, rgb, SpriteCache, textSprite, type Sprite } from './pixel.ts';
+import { studentSprite } from './pixel-student.ts';
+import {
+  arrowIcon, bellIcon, CHIMNEY, chevronIcon, crossIcon, crownIcon, plusIcon, schoolSprite, springSprite, starIcon, tentSprite,
+  type SchoolState,
+} from './props.ts';
+import { RACE } from './student.ts';
 
-export const BOARD_W = BSIZE * 48; // 菱形半宽
-export const BOARD_H = BSIZE * 48; // 菱形高
-const CURB = 5; // 操场路沿的高度
+export { BOARD_H, BOARD_W, schoolAnchor, tileCenter } from './geom.ts';
+
+/** 像素字体（public/fonts，界面同用） */
+export const PIXEL_FONT = '"Fusion Pixel", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif';
+
 /** 视野能看到的范围（世界坐标 x0, y0, x1, y1）：操场外留一格宽的草地，顶上多留出校舍的高度 */
 const VIEW_BOUNDS = [-BOARD_W - 96, -130, BOARD_W + 96, BOARD_H + 96] as const;
 
@@ -68,6 +81,8 @@ export interface ViewState {
   amove?: boolean;
   /** 本机玩家的阵营（联机局的共享状态里 user_col 固定为 4）；省略时用 g.user_col */
   me?: number;
+  /** 本机玩家眼中的迷雾；省略表示全部可见 */
+  fog?: FogView | null;
 }
 
 export interface Fx {
@@ -75,8 +90,8 @@ export interface Fx {
   levelups: { pn: number; t0: number; gain: number; star: boolean }[];
   impacts: { x: number; y: number; t0: number; big: boolean }[];
   blink: { bx: number; by: number; pn: number; t0: number } | null;
-  /** 飘字（挥空的"闪"等） */
-  texts: { x: number; y: number; t0: number; text: string }[];
+  /** 飘字（挥空的"闪"、夹击、班长等） */
+  texts: { x: number; y: number; t0: number; text: string; color?: string }[];
   /** 每个槽位最后一次挨打的时间（受击闪白、后仰） */
   hitAt: Float64Array;
   /** 击倒时冒出的星星 */
@@ -85,12 +100,14 @@ export interface Fx {
   raised: Map<number, number>;
   /** 小地图上的警报光圈 */
   pings: { bx: number; by: number; t0: number; color: string }[];
+  /** 刚涂好的大格（闪一下边框） */
+  painted: { t: number; col: number; t0: number }[];
 }
 
 export function newFx(): Fx {
   return {
     levelups: [], impacts: [], blink: null, texts: [], hitAt: new Float64Array(PMAX).fill(-1e9), kos: [],
-    raised: new Map(), pings: [],
+    raised: new Map(), pings: [], painted: [],
   };
 }
 
@@ -115,25 +132,29 @@ export function unitPos(g: Game, ip: Interp, pn: number): [number, number] {
   return [ip.prevX[pn] + (p.px - ip.prevX[pn]) * a + ox, ip.prevY[pn] + (p.py - ip.prevY[pn]) * a + oy];
 }
 
-/** 大格中心的世界坐标 */
-export function tileCenter(bx: number, by: number): [number, number] {
-  return [bx * 48 - by * 48, by * 24 + bx * 24 + 24];
-}
+// ---- 美术画布 ----
 
-function diamond(ctx: CanvasRenderingContext2D, x: number, y: number, hw: number, hh: number): void {
-  ctx.beginPath();
-  ctx.moveTo(x, y - hh);
-  ctx.lineTo(x + hw, y);
-  ctx.lineTo(x, y + hh);
-  ctx.lineTo(x - hw, y);
-  ctx.closePath();
-}
+let art: HTMLCanvasElement | null = null;
+let artCtx: CanvasRenderingContext2D;
+let up: HTMLCanvasElement;
+let upCtx: CanvasRenderingContext2D;
+let ground: GroundLayer | null = null;
 
-/** 进入"贴地"坐标系：在其中画的图形会被压扁成等距投影，朝上即屏幕上方 */
-function groundSpace(ctx: CanvasRenderingContext2D, x: number, y: number): void {
-  ctx.translate(x, y);
-  ctx.transform(1, 0.5, -1, 0.5, 0, 0);
-  ctx.rotate(-Math.PI / 4);
+function surfaces(aw: number, ah: number, k: number): void {
+  if (!art) {
+    art = document.createElement('canvas');
+    artCtx = art.getContext('2d')!;
+    up = document.createElement('canvas');
+    upCtx = up.getContext('2d')!;
+  }
+  if (art.width !== aw || art.height !== ah) {
+    art.width = aw;
+    art.height = ah;
+  }
+  if (up.width !== aw * k || up.height !== ah * k) {
+    up.width = aw * k;
+    up.height = ah * k;
+  }
 }
 
 export function render(
@@ -147,147 +168,35 @@ export function render(
   dpr: number,
   withMinimap = true,
 ): { mm: MinimapRect | null } {
-  const W = cam.w;
-  const H = cam.h;
-  // 夜空背景由 .game-canvas 的 CSS 渐变提供，画布只需清空
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, W, H);
+  const devW = ctx.canvas.width;
+  const devH = ctx.canvas.height;
+  // 每个美术像素占多少设备像素
+  const P = (cam.zoom * dpr) / ART;
+  const aw = Math.ceil(devW / P) + 2;
+  const ah = Math.ceil(devH / P) + 2;
+  const k = Math.max(1, Math.floor(P));
+  surfaces(aw, ah, k);
+  const left = (cam.x - cam.w / 2 / cam.zoom) * ART;
+  const top = (cam.y - cam.h / 2 / cam.zoom) * ART;
+  const ix = Math.floor(left);
+  const iy = Math.floor(top);
+  const a = artCtx;
+  a.setTransform(1, 0, 0, 1, 0, 0);
+  a.clearRect(0, 0, aw, ah);
+  a.imageSmoothingEnabled = false;
+  a.setTransform(ART, 0, 0, ART, -ix, -iy);
+  drawWorld(a, g, ip, view, fx, now);
 
-  ctx.setTransform(dpr * cam.zoom, 0, 0, dpr * cam.zoom, dpr * (W / 2 - cam.x * cam.zoom), dpr * (H / 2 - cam.y * cam.zoom));
-
-  const [vx0, vy0] = cam.toWorld(0, 0);
-  const [vx1, vy1] = cam.toWorld(W, H);
-  drawScenery(ctx, g, vx0, vy0, vx1, vy1, now);
-  paintBoard(ctx);
-  drawGround(ctx, g, now);
-  if (g.rules.ruleset === 'remake') drawRally(ctx, g, view, now);
-  drawRoutes(ctx, g, ip, view, now);
-
-  // 下令光标：进攻移动为红色
-  if (view.cursorTile) drawTileCursor(ctx, view.cursorTile.bx, view.cursorTile.by, view.amove ? '#ff6a5a' : 'rgba(255,255,255,0.9)');
-  if (fx.blink && fx.blink.pn < 0) {
-    const k = Math.floor((now - fx.blink.t0) / (1000 / 18));
-    if (k < 7 && k % 2 === 1) drawTileCursor(ctx, fx.blink.bx, fx.blink.by, '#ffe066');
-  }
-
-  // 校舍在棋盘外角：上、左、右三角的在一切之后方，下角的在一切之前
-  const front: Area[] = [];
-  for (const a of g.area) {
-    if (a.areatype !== 1) continue;
-    if (a.bx === BSIZE - 1 && a.by === BSIZE - 1) front.push(a);
-    else drawSchool(ctx, g, a, now);
-  }
-
-  // 学生与标牌按深度排序（原版按小格 swapDepths；标牌插在所在大格中心那一排）
-  const items: { key: number; pn: number; area: number }[] = [];
-  for (let i = 0; i < PMAX; i++) {
-    const p = g.people[i];
-    if (p.stat !== PS.EMPTY) items.push({ key: (p.cx + p.cy) * 1000 + p.cx, pn: i, area: -1 });
-  }
-  g.area.forEach((a, n) => {
-    if (a.areatype !== 1) items.push({ key: (a.bx * 4 + a.by * 4 + 3) * 1000 + 999, pn: -1, area: n });
-  });
-  items.sort((a, b) => a.key - b.key);
-  const remake = g.rules.ruleset === 'remake';
-  for (const it of items) {
-    if (it.area >= 0) {
-      if (g.area[it.area].areatype === AREA.SPADE) drawCamp(ctx, g, it.area, fx, now);
-      else drawSpring(ctx, g, it.area, fx, now);
-      continue;
-    }
-    const pn = it.pn;
-    const p = g.people[pn];
-    let [x, y] = unitPos(g, ip, pn);
-    // 受击：闪白并向后一仰
-    const since = now - fx.hitAt[pn];
-    const flash = since < 160 ? 1 - since / 160 : 0;
-    if (flash > 0 && p.stat > PS.DEAD) {
-      const back = [[-1, -0.5], [1, -0.5], [1, 0.5], [-1, 0.5]][p.dir];
-      x += back[0] * 2 * flash;
-      y += back[1] * 2 * flash;
-    }
-    const alive = p.stat > PS.DEAD;
-    const sel = alive && view.selected.has(pn);
-    const hover = alive && !sel && view.hoverPn === pn;
-    const nStars = remake ? stars(p.lev) : 0;
-    // 升级时向上弹一下
-    const lu = fx.levelups.find((f) => f.pn === pn);
-    if (lu && alive) {
-      const k = (now - lu.t0) / 420;
-      if (k < 1) y -= Math.sin(k * Math.PI) * (lu.star ? 7 : 5);
-    }
-    // 老兵脚下常驻淡金色光环
-    if (nStars > 0 && alive) {
-      ctx.beginPath();
-      ctx.ellipse(x, y + 6, 10 + nStars, 5 + nStars / 2, 0, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(255,214,90,${0.12 + 0.06 * nStars})`;
-      ctx.fill();
-    }
-    if (sel) {
-      const pulse = 0.5 + 0.5 * Math.sin(now / 180);
-      ctx.beginPath();
-      ctx.ellipse(x, y + 6, 12 + pulse, 6 + pulse / 2, 0, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(120,255,200,0.18)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(120,255,200,0.95)';
-      ctx.lineWidth = 1.6;
-      ctx.stroke();
-    }
-    if (sel || hover) {
-      drawStudentShadow(ctx, x, y + 6, p.col, p.show);
-      drawOutlined(
-        ctx, x - 22, y - 50, 44, 62,
-        (c) => drawStudent(c, x, y + 6, p.col, p.dir, p.show, flash, false),
-        sel ? '#78ffc8' : 'rgba(255,255,255,0.9)',
-        (sel ? 1.8 : 1.1) * dpr,
-        sel ? 5 * dpr : 0,
-      );
-    } else {
-      drawStudent(ctx, x, y + 6, p.col, p.dir, p.show, flash);
-    }
-    if (alive && p.stat === PS.SIT && p.hp < p.mhp && healsHere(g, pn)) healPlus(ctx, x, y, now, pn);
-    if (alive) {
-      // 血条宽度 = 生命值（原版 mcHP），所以老兵的血条更长
-      const bw = p.mhp;
-      const bx = x - Math.floor(p.mhp / 2);
-      const by = y - 38;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(bx - 0.6, by - 0.6, bw + 1.2, 3.2);
-      ctx.fillStyle = '#6b1d1d';
-      ctx.fillRect(bx, by, bw, 2);
-      ctx.fillStyle = p.hp / p.mhp > 0.35 ? '#5fe36f' : '#ffcf3a';
-      ctx.fillRect(bx, by, Math.max(0, p.hp), 2);
-      const n = nStars;
-      for (let i = 0; i < n; i++) star(ctx, x + (i - (n - 1) / 2) * 6, by - 4, 2.6, '#ffd84a');
-    }
-  }
-  for (const a of front) drawSchool(ctx, g, a, now);
-
-  // 攻击目标箭头
-  const arrowPn = view.arrowPn >= 0 ? view.arrowPn : fx.blink && fx.blink.pn >= 0 ? fx.blink.pn : -1;
-  if (arrowPn >= 0 && g.people[arrowPn].stat > PS.DEAD) {
-    let show = true;
-    if (view.arrowPn < 0 && fx.blink) {
-      const k = Math.floor((now - fx.blink.t0) / (1000 / 18));
-      show = k < 7 && k % 2 === 1;
-    }
-    if (show) {
-      const [x, y] = unitPos(g, ip, arrowPn);
-      const bob = Math.sin(now / 120) * 2;
-      ctx.beginPath();
-      ctx.moveTo(x, y - 41 + bob);
-      ctx.lineTo(x - 5, y - 49 + bob);
-      ctx.lineTo(x + 5, y - 49 + bob);
-      ctx.closePath();
-      ctx.fillStyle = '#ff4a3d';
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-  }
-
-  drawEffects(ctx, g, ip, fx, now);
+  // 最近邻放大到整数倍，再平滑缩放到实际倍率
+  upCtx.imageSmoothingEnabled = false;
+  upCtx.clearRect(0, 0, up.width, up.height);
+  upCtx.drawImage(art!, 0, 0, aw, ah, 0, 0, aw * k, ah * k);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, devW, devH);
+  ctx.imageSmoothingEnabled = Math.abs(P - k) > 0.001;
+  ctx.imageSmoothingQuality = 'low';
+  ctx.drawImage(up, 0, 0, aw * k, ah * k, (ix - left) * P, (iy - top) * P, aw * P, ah * P);
+  ctx.imageSmoothingEnabled = true;
 
   // 屏幕空间：框选框、小地图
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -296,145 +205,424 @@ export function render(
     ctx.fillStyle = 'rgba(120,255,200,0.12)';
     ctx.strokeStyle = 'rgba(120,255,200,0.9)';
     ctx.lineWidth = 1;
-    const x = Math.min(r.x1, r.x2);
-    const y = Math.min(r.y1, r.y2);
-    ctx.fillRect(x, y, Math.abs(r.x2 - r.x1), Math.abs(r.y2 - r.y1));
-    ctx.strokeRect(x + 0.5, y + 0.5, Math.abs(r.x2 - r.x1), Math.abs(r.y2 - r.y1));
+    const x = Math.round(Math.min(r.x1, r.x2));
+    const y = Math.round(Math.min(r.y1, r.y2));
+    const w = Math.round(Math.abs(r.x2 - r.x1));
+    const hh = Math.round(Math.abs(r.y2 - r.y1));
+    ctx.fillRect(x, y, w, hh);
+    ctx.setLineDash([4, 2]);
+    ctx.strokeRect(x + 0.5, y + 0.5, w, hh);
+    ctx.setLineDash([]);
   }
-  return { mm: withMinimap ? drawMinimap(ctx, g, cam, fx, now, view.me ?? g.user_col) : null };
+  return { mm: withMinimap ? drawMinimap(ctx, g, cam, fx, now, view.me ?? g.user_col, view.fog ?? null, dpr) : null };
 }
 
-function drawEffects(ctx: CanvasRenderingContext2D, g: Game, ip: Interp, fx: Fx, now: number): void {
-  // 出拳火花
-  fx.impacts = fx.impacts.filter((f) => now - f.t0 < 260);
-  for (const f of fx.impacts) {
-    const k = (now - f.t0) / 260;
-    ctx.save();
-    ctx.translate(f.x, f.y - 18);
-    ctx.globalAlpha = 1 - k;
-    ctx.strokeStyle = f.big ? '#ffffff' : '#ffe680';
-    ctx.lineWidth = 1.4;
-    const r0 = 3 + k * 4;
-    const r1 = r0 + (f.big ? 7 : 4);
-    ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2 + 0.3;
-      ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
-      ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+function drawWorld(a: CanvasRenderingContext2D, g: Game, ip: Interp, view: ViewState, fx: Fx, now: number): void {
+  const bd = backdrop();
+  a.drawImage(bd, BACK_X0, BACK_Y0, bd.width / ART, bd.height / ART);
+  const fog = view.fog && view.fog.enabled ? view.fog : null;
+  if (!ground) ground = new GroundLayer();
+  ground.update(g, fog);
+  ground.draw(a);
+  drawPainted(a, fx, now);
+  drawGround(a, g, now, fog);
+  if (g.rules.ruleset === 'remake') {
+    drawBell(a, g, now);
+    drawRally(a, g, view, now);
+  }
+  drawRoutes(a, g, ip, view, now);
+
+  // 下令光标：进攻移动为红色
+  if (view.cursorTile) {
+    const [x, y] = tileCenter(view.cursorTile.bx, view.cursorTile.by);
+    pxDiamondEdge(a, x, y, 46, 23, view.amove ? '#ff6a5a' : '#ffffff', 3);
+  }
+  if (fx.blink && fx.blink.pn < 0) {
+    const k = Math.floor((now - fx.blink.t0) / (1000 / 18));
+    if (k < 7 && k % 2 === 1) {
+      const [x, y] = tileCenter(fx.blink.bx, fx.blink.by);
+      pxDiamondEdge(a, x, y, 46, 23, '#ffe066', 3);
     }
-    ctx.stroke();
-    ctx.restore();
   }
 
-  // 击倒：头上转圈的星星
-  fx.kos = fx.kos.filter((f) => now - f.t0 < 1400);
-  for (const f of fx.kos) {
-    const k = (now - f.t0) / 1400;
-    ctx.globalAlpha = k < 0.75 ? 1 : 1 - (k - 0.75) / 0.25;
+  // 校舍在棋盘外角：上、左、右三角的在一切之后方，下角的在一切之前
+  const front: Area[] = [];
+  for (const ar of g.area) {
+    if (ar.areatype !== AREA.BASE) continue;
+    if (ar.bx === BSIZE - 1 && ar.by === BSIZE - 1) front.push(ar);
+    else drawSchool(a, g, ar, now);
+  }
+
+  // 学生与标牌按深度排序（原版按小格 swapDepths；标牌插在所在大格中心那一排）
+  const items: { key: number; pn: number; area: number }[] = [];
+  for (let i = 0; i < PMAX; i++) {
+    const p = g.people[i];
+    if (p.stat === PS.EMPTY) continue;
+    if (fog && !fog.unit(g, i)) continue;
+    items.push({ key: (p.cx + p.cy) * 1000 + p.cx, pn: i, area: -1 });
+  }
+  g.area.forEach((ar, n) => {
+    if (ar.areatype !== AREA.BASE) items.push({ key: (ar.bx * 4 + ar.by * 4 + 3) * 1000 + 999, pn: -1, area: n });
+  });
+  items.sort((x, y) => x.key - y.key);
+  const remake = g.rules.ruleset === 'remake';
+  for (const it of items) {
+    if (it.area >= 0) {
+      const ar = g.area[it.area];
+      const tIdx = ar.by * BSIZE + ar.bx;
+      const known = fog ? fog.owner(g, tIdx) : ar.col;
+      const dim = !!fog && fog.tile(tIdx) !== FOG.SEEN;
+      if (ar.areatype === AREA.SPADE) drawCamp(a, g, it.area, known, dim, fx, now);
+      else drawSpring(a, g, it.area, known, dim, fx, now);
+      continue;
+    }
+    drawUnit(a, g, ip, view, fx, now, it.pn, remake);
+  }
+  for (const ar of front) drawSchool(a, g, ar, now);
+
+  // 攻击目标箭头
+  const arrowPn = view.arrowPn >= 0 ? view.arrowPn : fx.blink && fx.blink.pn >= 0 ? fx.blink.pn : -1;
+  if (arrowPn >= 0 && g.people[arrowPn].stat > PS.DEAD && (!fog || fog.unit(g, arrowPn))) {
+    let show = true;
+    if (view.arrowPn < 0 && fx.blink) {
+      const k = Math.floor((now - fx.blink.t0) / (1000 / 18));
+      show = k < 7 && k % 2 === 1;
+    }
+    if (show) {
+      const [x, y] = unitPos(g, ip, arrowPn);
+      blit(a, arrowIcon(), x, y - 64 + (Math.floor(now / 160) % 2) * 2);
+    }
+  }
+
+  drawEffects(a, g, ip, fx, now, fog);
+}
+
+// ---- 学生 ----
+
+const shadows = new SpriteCache();
+
+function shadowSprite(col: number, lying: boolean): Sprite {
+  return shadows.get(`${col}/${lying}`, () => {
+    const sx = (RACE[col] ?? RACE[0]).body[0];
+    const rx = Math.round((lying ? 15 : 9) * sx * ART);
+    const ry = lying ? 2 : 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = rx * 2 + 1;
+    canvas.height = ry * 2 + 1;
+    const c = canvas.getContext('2d')!;
+    c.fillStyle = 'rgba(0,0,0,0.3)';
+    for (let r = -ry; r <= ry; r++) {
+      const half = Math.round(rx * Math.sqrt(1 - (r / (ry + 0.6)) ** 2));
+      c.fillRect(rx - half, ry + r, half * 2 + 1, 1);
+    }
+    return { canvas, ax: rx - (lying ? 1 : 0), ay: ry };
+  });
+}
+
+function drawUnit(
+  a: CanvasRenderingContext2D, g: Game, ip: Interp, view: ViewState, fx: Fx, now: number, pn: number, remake: boolean,
+): void {
+  const p = g.people[pn];
+  let [x, y] = unitPos(g, ip, pn);
+  // 受击：闪白并向后一仰
+  const since = now - fx.hitAt[pn];
+  const flash = since < 160 ? 1 - since / 160 : 0;
+  if (flash > 0 && p.stat > PS.DEAD) {
+    const back = [[-1, -0.5], [1, -0.5], [1, 0.5], [-1, 0.5]][p.dir];
+    x += back[0] * 3 * flash;
+    y += back[1] * 3 * flash;
+  }
+  const alive = p.stat > PS.DEAD;
+  const sel = alive && view.selected.has(pn);
+  const hover = alive && !sel && view.hoverPn === pn;
+  const nStars = remake ? stars(p.lev) : 0;
+  // 升级时向上弹一下
+  const lu = fx.levelups.find((f) => f.pn === pn);
+  let hop = 0;
+  if (lu && alive) {
+    const k = (now - lu.t0) / 420;
+    if (k < 1) hop = Math.round(Math.sin(k * Math.PI) * (lu.star ? 4 : 3)) / ART;
+  }
+  const feetY = y + 6;
+  const lying = p.show >= 23;
+  if (p.show !== 24) blit(a, shadowSprite(p.col, lying), x, feetY);
+  // 老兵脚下常驻淡金色光环；选中时一圈青色
+  if (nStars > 0 && alive) pxEllipse(a, x, feetY, 11 + nStars, 5 + nStars / 2, `rgba(255,214,90,${0.25 + 0.1 * nStars})`, 1);
+  if (sel) pxEllipse(a, x, feetY, 13 + (Math.floor(now / 250) % 2) * 2, 6.5 + (Math.floor(now / 250) % 2), '#78ffc8', 1);
+  const sp = studentSprite(p.col, p.dir, p.show, {
+    flash: flash > 0.25,
+    outline: sel ? '#78ffc8' : hover ? '#ffffff' : undefined,
+  });
+  blit(a, sp, x, feetY - hop);
+  if (!alive) return;
+  if (p.stat === PS.SIT && p.hp < p.mhp && healsHere(g, pn)) {
+    const k = ((now + pn * 233) % 1100) / 1100;
+    if (k < 0.7) blit(a, plusIcon(), x + 10, y - 40 - k * 24);
+  }
+  // 血条宽度 = 生命值（原版 mcHP），所以老兵的血条更长；一个美术像素对两点生命
+  const bw = Math.max(4, Math.round(p.mhp * ART));
+  const bx = Math.round(x * ART) - (bw >> 1);
+  const by = Math.round((feetY - 62) * ART);
+  a.fillStyle = '#140c10';
+  a.fillRect((bx - 1) / ART, (by - 1) / ART, (bw + 2) / ART, 4 / ART);
+  a.fillStyle = '#6b1d1d';
+  a.fillRect(bx / ART, by / ART, bw / ART, 2 / ART);
+  a.fillStyle = p.hp / p.mhp > 0.35 ? '#5fe36f' : '#ffcf3a';
+  a.fillRect(bx / ART, by / ART, Math.max(0, Math.round((p.hp / p.mhp) * bw)) / ART, 2 / ART);
+  // 星、班长王冠、队员小箭头
+  const iconY = (by - 4) / ART;
+  if (remake && isLeader(p)) {
+    blit(a, crownIcon(), x, iconY - 2 / ART);
+  } else if (nStars > 0) {
+    for (let i = 0; i < nStars; i++) blit(a, starIcon(), x + ((i - (nStars - 1) / 2) * 6) / ART, iconY);
+  }
+  if (p.squad >= 0) blit(a, chevronIcon(), (bx - 4) / ART, (by + 1) / ART);
+}
+
+/** 单位坐着的地方能不能给它回血（己方泉水，或未沦陷的己方本部） */
+function healsHere(g: Game, pn: number): boolean {
+  const p = g.people[pn];
+  const n = g.bmap_n[Math.floor(p.cy / 4) * BSIZE + Math.floor(p.cx / 4)];
+  if (n < 0) return false;
+  const ar = g.area[n];
+  return ar.col === p.col && (ar.areatype === AREA.HEART || (ar.areatype === AREA.BASE && !ar.fallen && g.rules.ruleset === 'remake') || (ar.areatype === AREA.BASE && g.rules.ruleset === 'classic'));
+}
+
+// ---- 像素小工具 ----
+
+/** 椭圆：mode 0 实心，1 为 1 美术像素宽的边（只画从正上方顺时针 from–to 这一段） */
+function pxEllipse(a: CanvasRenderingContext2D, wx: number, wy: number, rx: number, ry: number, color: string, mode: 0 | 1, from = 0, to = 1): void {
+  a.fillStyle = color;
+  const cx = Math.round(wx * ART);
+  const cy = Math.round(wy * ART);
+  const RX = Math.max(1, Math.round(rx * ART));
+  const RY = Math.max(1, Math.round(ry * ART));
+  if (mode === 0) {
+    for (let r = -RY; r <= RY; r++) {
+      const half = Math.round(RX * Math.sqrt(Math.max(0, 1 - (r / (RY + 0.5)) ** 2)));
+      a.fillRect((cx - half) / ART, (cy + r) / ART, (2 * half + 1) / ART, 1 / ART);
+    }
+    return;
+  }
+  const n = Math.ceil((RX + RY) * 4);
+  let lx = 1e9;
+  let ly = 1e9;
+  for (let i = 0; i <= n; i++) {
+    const k = from + ((to - from) * i) / n;
+    const ang = -Math.PI / 2 + k * Math.PI * 2;
+    const px = cx + Math.round(Math.cos(ang) * RX);
+    const py = cy + Math.round(Math.sin(ang) * RY);
+    if (px === lx && py === ly) continue;
+    lx = px;
+    ly = py;
+    a.fillRect(px / ART, py / ART, 1 / ART, 1 / ART);
+  }
+}
+
+/** 像素直线（Bresenham）；dash 为虚线周期（美术像素），phase 让虚线流动 */
+function pxLine(a: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string, dash = 0, phase = 0): void {
+  a.fillStyle = color;
+  let X0 = Math.round(x0 * ART);
+  let Y0 = Math.round(y0 * ART);
+  const X1 = Math.round(x1 * ART);
+  const Y1 = Math.round(y1 * ART);
+  const dx = Math.abs(X1 - X0);
+  const dy = -Math.abs(Y1 - Y0);
+  const sx = X0 < X1 ? 1 : -1;
+  const sy = Y0 < Y1 ? 1 : -1;
+  let err = dx + dy;
+  let i = 0;
+  for (let guard = 0; guard < 4000; guard++) {
+    if (!dash || (((i + phase) % dash) + dash) % dash < dash / 2) a.fillRect(X0 / ART, Y0 / ART, 1 / ART, 1 / ART);
+    if (X0 === X1 && Y0 === Y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      X0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      Y0 += sy;
+    }
+    i++;
+  }
+}
+
+/** 像素字（美术画布上 12 像素高）：底边中点（align 为 left 时左端）对准世界坐标 */
+function pxText(a: CanvasRenderingContext2D, text: string, wx: number, wy: number, color: string, outline: string | null = '#140c10', align: 'center' | 'left' = 'center'): void {
+  const s = textSprite(text, color, outline || null, PIXEL_FONT);
+  blit(a, align === 'left' ? { ...s, ax: 2 } : s, wx, wy);
+}
+
+// ---- 地块 ----
+
+const EMBLEM_ZH = ['人', '兽', '矮', '精'];
+const EMBLEM_EN = ['H', 'O', 'D', 'E'];
+
+export function emblem(col: number): string {
+  return (getLang() === 'zh' ? EMBLEM_ZH : EMBLEM_EN)[col] ?? '';
+}
+
+/** 地面上的地块标记：本部校徽与出兵进度、占领进度圈（地盘底色在地面层里） */
+function drawGround(a: CanvasRenderingContext2D, g: Game, now: number, fog: FogView | null): void {
+  for (const ar of g.area) {
+    const [x, y] = tileCenter(ar.bx, ar.by);
+    const tIdx = ar.by * BSIZE + ar.bx;
+    const seen = !fog || fog.tile(tIdx) === FOG.SEEN;
+    if (ar.areatype === AREA.BASE) {
+      const alive = g.player[ar.col].exist;
+      pxDiamondEdge(a, x, y, 40, 20, ar.fallen ? 'rgba(60,0,0,0.5)' : 'rgba(255,255,255,0.45)', ar.fallen ? 3 : 0);
+      pxText(a, emblem(ar.col), x, y + 10, alive ? '#ffffff' : '#c8c8c8', null);
+      if (alive && !ar.fallen && settings.showSpawn && (!fog || ar.col === fog.me)) {
+        const need = factionSpec(g.rules.ruleset, ar.col).appear;
+        const k = Math.min(1, g.player[ar.col].appear_cnt / need);
+        pxEllipse(a, x, y, 34, 17, 'rgba(255,255,255,0.85)', 1, 0, k);
+      }
+      if (settings.showCapture && seen) {
+        // 攻陷进度（敌方）或夺回进度（己方）
+        const need = ar.fallen ? RECOVER_VALUE : SIEGE_VALUE;
+        let best = -1;
+        for (let c2 = 0; c2 < 4; c2++) {
+          if (ar.val[c2] <= 0) continue;
+          if (ar.fallen ? c2 !== ar.col : c2 === ar.col) continue;
+          if (best < 0 || ar.val[c2] > ar.val[best]) best = c2;
+        }
+        if (best >= 0) progressRing(a, x, y, 40, ar.val[best] / need, FACTION[best].ui, now);
+      }
+      continue;
+    }
+    if (settings.showCapture && seen) {
+      const owner = ar.col;
+      let best = -1;
+      for (let c = 0; c < 4; c++) if (c !== owner && ar.val[c] > 0 && (best < 0 || ar.val[c] > ar.val[best])) best = c;
+      if (best >= 0) progressRing(a, x, y, 36, ar.val[best] / CAPTURE_VALUE, FACTION[best].ui, now);
+    }
+  }
+}
+
+function progressRing(a: CanvasRenderingContext2D, x: number, y: number, r: number, k: number, color: string, now: number): void {
+  pxEllipse(a, x, y, r, r / 2, 'rgba(0,0,0,0.25)', 1);
+  pxEllipse(a, x, y, r, r / 2, Math.floor(now / 150) % 2 ? color : '#ffffff', 1, 0, Math.min(1, k));
+  pxEllipse(a, x, y, r - 2, r / 2 - 1, color, 1, 0, Math.min(1, k));
+}
+
+/** 刚涂好的大格：边框闪两下 */
+function drawPainted(a: CanvasRenderingContext2D, fx: Fx, now: number): void {
+  fx.painted = fx.painted.filter((f) => now - f.t0 < 600);
+  for (const f of fx.painted) {
+    if (Math.floor((now - f.t0) / 150) % 2) continue;
+    const [x, y] = tileCenter(f.t % BSIZE, Math.floor(f.t / BSIZE));
+    pxDiamondEdge(a, x, y, 47, 23.5, '#ffffff');
+  }
+}
+
+/** 下课铃：小卖部所在的大格金边闪烁，上方一口晃动的铃铛和剩余秒数 */
+function drawBell(a: CanvasRenderingContext2D, g: Game, now: number): void {
+  const b = g.bell;
+  if (b.bx < 0 || g.tick >= b.until) return;
+  const [x, y] = tileCenter(b.bx, b.by);
+  const on = Math.floor(now / 300) % 2 === 0;
+  pxDiamondEdge(a, x, y, 47, 23.5, on ? '#ffd84a' : '#fff3a0');
+  pxDiamondEdge(a, x, y, 43, 21.5, 'rgba(255,216,74,0.6)', 2);
+  const swing = [0, 1, 0, -1][Math.floor(now / 180) % 4];
+  blit(a, bellIcon(), x + swing / ART, y - 26);
+  const left = Math.ceil((b.until - g.tick) / 18);
+  pxText(a, `${left}`, x, y - 50, '#fff3a0');
+}
+
+/** 地块上方的小旗：占领后 0.6 秒升到顶 */
+function siteFlag(a: CanvasRenderingContext2D, x: number, top: number, owner: number, n: number, fx: Fx, now: number): void {
+  if (owner < 0) return;
+  const t0 = fx.raised.get(n);
+  const k = t0 === undefined ? 1 : Math.min(1, (now - t0) / 600);
+  const X = Math.round(x * ART);
+  const T = Math.round(top * ART);
+  a.fillStyle = '#3a2a1c';
+  a.fillRect(X / ART, (T - 7) / ART, 1 / ART, 8 / ART);
+  const fy = T - 2 - Math.round(4 * k);
+  const wave = Math.floor(now / 250 + n) % 2;
+  a.fillStyle = FACTION[owner].ui;
+  a.fillRect((X + 1) / ART, (fy - 1) / ART, 4 / ART, 1 / ART);
+  a.fillRect((X + 1) / ART, fy / ART, (5 - wave) / ART, 1 / ART);
+  a.fillRect((X + 1) / ART, (fy + 1) / ART, 3 / ART, 1 / ART);
+}
+
+function drawCamp(a: CanvasRenderingContext2D, g: Game, n: number, owner: number, dim: boolean, fx: Fx, now: number): void {
+  const ar = g.area[n];
+  const [x, y] = tileCenter(ar.bx, ar.by);
+  const o = owner === -2 ? -1 : owner;
+  blit(a, tentSprite(o, dim), x, y);
+  if (!dim) siteFlag(a, x, y - 22, o, n, fx, now);
+  if (settings.colorblind && o >= 0) pxText(a, emblem(o), x + 12, y + 2, '#ffffff');
+}
+
+function drawSpring(a: CanvasRenderingContext2D, g: Game, n: number, owner: number, dim: boolean, fx: Fx, now: number): void {
+  const ar = g.area[n];
+  const [x, y] = tileCenter(ar.bx, ar.by);
+  const o = owner === -2 ? -1 : owner;
+  blit(a, springSprite(o, dim), x, y);
+  if (!dim) {
+    // 水面上一闪一闪的高光
+    const ph = Math.floor(now / 400 + n) % 3;
+    a.fillStyle = '#ffffff';
+    a.fillRect((Math.round(x * ART) - 2 + ph * 2) / ART, (Math.round(y * ART) - 1) / ART, 1 / ART, 1 / ART);
+    const bob = Math.floor(now / 400 + n) % 2;
+    blit(a, crossIcon(o >= 0), x, y - 30 - bob / ART);
+    siteFlag(a, x - 12, y - 4, o, n, fx, now);
+  }
+  if (settings.colorblind && o >= 0) pxText(a, emblem(o), x + 14, y + 6, '#ffffff');
+}
+
+// ---- 校舍 ----
+
+/** 世界坐标点是否落在校舍上（含屋顶和旗杆） */
+export function hitSchool(bx: number, by: number, wx: number, wy: number): boolean {
+  const [cx, cy] = schoolAnchor(bx, by);
+  return Math.abs(wx - cx) <= SCHOOL_W + 2 && wy >= cy - SCHOOL_H - 56 && wy <= cy + SCHOOL_D;
+}
+
+function drawSchool(a: CanvasRenderingContext2D, g: Game, ar: Area, now: number): void {
+  const col = ar.col;
+  const alive = g.player[col].exist;
+  const state: SchoolState = !alive ? 'dead' : ar.fallen ? 'fallen' : 'ok';
+  const [cx, cy] = schoolAnchor(ar.bx, ar.by);
+  pxDiamond(a, cx + 4, cy + 2, SCHOOL_W + 2, SCHOOL_D + 1, 'rgba(0,0,0,0.25)');
+  const { sprite, apexY } = schoolSprite(col, state);
+  blit(a, sprite, cx, cy);
+  // 矮人烟囱冒烟
+  if (col === 2 && state === 'ok') {
     for (let i = 0; i < 3; i++) {
-      const a = now / 220 + (i * Math.PI * 2) / 3;
-      star(ctx, f.x + Math.cos(a) * 9, f.y - 14 + Math.sin(a) * 3, 2.4, '#ffe14d');
+      const k = (now / 2200 + i / 3) % 1;
+      const r = 1 + Math.round(k * 2);
+      a.fillStyle = `rgba(232,232,232,${(0.6 * (1 - k)).toFixed(2)})`;
+      const X = Math.round((cx + CHIMNEY[0] + k * 6) * ART);
+      const Y = Math.round((cy + CHIMNEY[1] - 14 - k * 16) * ART);
+      a.fillRect((X - r) / ART, (Y - r + 1) / ART, (2 * r) / ART, (2 * r - 2) / ART);
+      a.fillRect((X - r + 1) / ART, (Y - r) / ART, (2 * r - 2) / ART, (2 * r) / ART);
     }
-    ctx.globalAlpha = 1;
   }
-
-  const font = getComputedFontFamily();
-  ctx.textAlign = 'center';
-  // 飘字（"闪"）
-  fx.texts = fx.texts.filter((f) => now - f.t0 < 700);
-  ctx.font = `900 8px ${font}`;
-  for (const f of fx.texts) {
-    const k = (now - f.t0) / 700;
-    ctx.globalAlpha = k < 0.6 ? 1 : 1 - (k - 0.6) / 0.4;
-    ctx.lineWidth = 2.2;
-    ctx.strokeStyle = 'rgba(10,20,40,0.85)';
-    ctx.strokeText(f.text, f.x + 6, f.y - 30 - k * 10);
-    ctx.fillStyle = '#bfe6ff';
-    ctx.fillText(f.text, f.x + 6, f.y - 30 - k * 10);
-  }
-  ctx.globalAlpha = 1;
-
-  // 升级：脚下金色光圈扩散、光柱升起、金色碎光上飘、头顶飘字；得星时一颗大星落到头顶
-  fx.levelups = fx.levelups.filter((f) => now - f.t0 < 1300);
-  for (const f of fx.levelups) {
-    if (g.people[f.pn].stat <= PS.DEAD) continue;
-    const k = (now - f.t0) / 1300;
-    const [x, y] = unitPos(g, ip, f.pn);
-    const fy = y + 6;
-    ctx.save();
-    // 光圈
-    for (const delay of [0, 0.12]) {
-      const kk = Math.max(0, Math.min(1, (k - delay) / 0.45));
-      if (kk <= 0 || kk >= 1) continue;
-      ctx.globalAlpha = 1 - kk;
-      ctx.beginPath();
-      ctx.ellipse(x, fy, 8 + kk * 22, 4 + kk * 11, 0, 0, Math.PI * 2);
-      ctx.strokeStyle = f.star ? '#fff3a0' : '#ffd84a';
-      ctx.lineWidth = 2.2 * (1 - kk) + 0.5;
-      ctx.stroke();
-    }
-    // 光柱
-    if (k < 0.6) {
-      const a = k < 0.15 ? k / 0.15 : 1 - (k - 0.15) / 0.45;
-      const hgt = 52 + (f.star ? 18 : 0);
-      const gr = ctx.createLinearGradient(0, fy - hgt, 0, fy);
-      gr.addColorStop(0, 'rgba(255,240,150,0)');
-      gr.addColorStop(0.6, 'rgba(255,225,110,0.45)');
-      gr.addColorStop(1, 'rgba(255,215,90,0.7)');
-      ctx.globalAlpha = a;
-      ctx.fillStyle = gr;
-      ctx.beginPath();
-      ctx.ellipse(x, fy, 9, 4.5, 0, 0, Math.PI);
-      ctx.lineTo(x - 7, fy - hgt);
-      ctx.lineTo(x + 7, fy - hgt);
-      ctx.closePath();
-      ctx.fill();
-    }
-    // 上飘的碎光（位置由槽位号和序号决定，不需要存状态）
-    for (let i = 0; i < 8; i++) {
-      const ph = (i * 0.618 + f.pn * 0.37) % 1;
-      const kk = k * 1.4 - ph * 0.3;
-      if (kk <= 0 || kk >= 1) continue;
-      const ang = (i / 8) * Math.PI * 2;
-      ctx.globalAlpha = 1 - kk;
-      star(ctx, x + Math.cos(ang) * (6 + kk * 6), fy - 6 - kk * 36 + Math.sin(ang) * 3, 1.6, '#fff1a8');
-    }
-    ctx.restore();
-    // 飘字
-    const ta = k < 0.75 ? 1 : 1 - (k - 0.75) / 0.25;
-    const ty = y - 50 - Math.min(1, k * 2) * 12;
-    ctx.globalAlpha = ta;
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = '#3a1b00';
-    ctx.font = `900 9px ${font}`;
-    const title = f.star ? t('msg.star') : t('msg.levelup');
-    ctx.strokeText(title, x, ty);
-    ctx.fillStyle = '#ffd84a';
-    ctx.fillText(title, x, ty);
-    ctx.font = `bold 6.5px ${font}`;
-    const sub = t('msg.levelup.gain', { n: f.gain });
-    ctx.lineWidth = 2;
-    ctx.strokeText(sub, x, ty + 8);
-    ctx.fillStyle = '#c8ffcf';
-    ctx.fillText(sub, x, ty + 8);
-    // 大星从光柱顶落到头顶的星位
-    if (f.star && k < 0.8) {
-      const kk = Math.min(1, k / 0.5);
-      const ease = 1 - (1 - kk) * (1 - kk);
-      ctx.globalAlpha = 1;
-      star(ctx, x, y - 72 + ease * 30, 6 - ease * 3, '#ffe14d');
-    }
-    ctx.globalAlpha = 1;
-  }
+  // 旗杆与旗子：平时是自己的校旗，沦陷时换成攻陷方的
+  const flagCol = ar.fallen && ar.holder >= 0 ? ar.holder : alive ? col : -1;
+  if (flagCol < 0) return;
+  const X = Math.round(cx * ART);
+  const top = Math.round((cy + apexY) * ART);
+  a.fillStyle = '#3d3a36';
+  a.fillRect(X / ART, (top - 10) / ART, 1 / ART, 10 / ART);
+  const wave = Math.floor(now / 220) % 2;
+  a.fillStyle = '#140c10';
+  a.fillRect((X + 1) / ART, (top - 11) / ART, 7 / ART, 6 / ART);
+  a.fillStyle = FACTION[flagCol].ui;
+  a.fillRect((X + 1) / ART, (top - 10) / ART, 6 / ART, (2 + wave) / ART);
+  a.fillRect((X + 1) / ART, (top - 8 + wave) / ART, (5 - wave) / ART, (2 - wave) / ART);
+  a.fillRect((X + 1) / ART, (top - 7) / ART, 3 / ART, 1 / ART);
 }
 
-/** 选中的人的行进路线：一条通往目的地的淡虚线（进攻移动为红色），终点画个落点 */
-function drawRoutes(ctx: CanvasRenderingContext2D, g: Game, ip: Interp, view: ViewState, now: number): void {
+// ---- 路线与集结点 ----
+
+/** 选中的人的行进路线：一条通往目的地的流动虚线（进攻移动为红色），终点画个落点 */
+function drawRoutes(a: CanvasRenderingContext2D, g: Game, ip: Interp, view: ViewState, now: number): void {
   if (view.selected.size === 0) return;
-  ctx.save();
-  ctx.lineWidth = 1.1;
-  ctx.setLineDash([3, 4]);
-  ctx.lineDashOffset = -now / 50;
+  const phase = -Math.floor(now / 80);
   for (const pn of view.selected) {
     const p = g.people[pn];
     if (p.stat !== PS.WALK && p.stat !== PS.WAIT) continue;
@@ -451,779 +639,128 @@ function drawRoutes(ctx: CanvasRenderingContext2D, g: Game, ip: Interp, view: Vi
       ty = dy * 6 + dx * 6 + 6;
     }
     const [x, y] = unitPos(g, ip, pn);
-    const color = p.target_pn >= 0 || p.amove ? 'rgba(255,110,90,0.85)' : 'rgba(150,255,210,0.8)';
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.8;
-    ctx.beginPath();
-    ctx.moveTo(x, y + 6);
-    ctx.lineTo(tx, ty);
-    ctx.stroke();
-    if (p.target_pn < 0) {
-      ctx.setLineDash([]);
-      diamond(ctx, tx, ty, 6, 3);
-      ctx.stroke();
-      ctx.setLineDash([3, 4]);
-    }
+    const color = p.target_pn >= 0 || p.amove ? 'rgba(255,110,90,0.9)' : 'rgba(150,255,210,0.85)';
+    pxLine(a, x, y + 6, tx, ty, color, 6, phase);
+    if (p.target_pn < 0) pxDiamondEdge(a, tx, ty, 8, 4, color);
   }
-  ctx.restore();
-}
-
-/** 单位坐着的地方能不能给它回血（己方泉水，或未沦陷的己方本部） */
-function healsHere(g: Game, pn: number): boolean {
-  const p = g.people[pn];
-  const n = g.bmap_n[Math.floor(p.cy / 4) * BSIZE + Math.floor(p.cx / 4)];
-  if (n < 0) return false;
-  const a = g.area[n];
-  return a.col === p.col && (a.areatype === AREA.HEART || (a.areatype === AREA.BASE && !a.fallen && g.rules.ruleset === 'remake') || (a.areatype === AREA.BASE && g.rules.ruleset === 'classic'));
-}
-
-/** 回血时头顶冒出的绿色"+"，每人错开节拍 */
-function healPlus(ctx: CanvasRenderingContext2D, x: number, y: number, now: number, pn: number): void {
-  const k = ((now + pn * 233) % 1100) / 1100;
-  if (k > 0.7) return;
-  const kk = k / 0.7;
-  ctx.save();
-  ctx.globalAlpha = 1 - kk;
-  ctx.translate(x + 7, y - 20 - kk * 14);
-  ctx.fillStyle = '#5fe36f';
-  ctx.strokeStyle = 'rgba(10,60,20,0.8)';
-  ctx.lineWidth = 0.7;
-  ctx.beginPath();
-  ctx.rect(-0.9, -3, 1.8, 6);
-  ctx.rect(-3, -0.9, 6, 1.8);
-  ctx.stroke();
-  ctx.fill();
-  ctx.restore();
-}
-
-function star(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color: string): void {
-  ctx.beginPath();
-  for (let i = 0; i < 10; i++) {
-    const a = -Math.PI / 2 + (i * Math.PI) / 5;
-    const rr = i % 2 ? r * 0.45 : r;
-    ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
-  }
-  ctx.closePath();
-  ctx.fillStyle = color;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(60,30,0,0.8)';
-  ctx.lineWidth = 0.6;
-  ctx.stroke();
-}
-
-let fontFamily = '';
-function getComputedFontFamily(): string {
-  if (!fontFamily) fontFamily = getComputedStyle(document.body).fontFamily || 'sans-serif';
-  return fontFamily;
-}
-
-// ---- 棋盘：直接矢量绘制。实测比离屏缓存再缩放贴图更快（软件渲染 1080p：0.6 ms 对 4.4 ms） ----
-
-function paintBoard(ctx: CanvasRenderingContext2D): void {
-  // 操场四周的阴影与路沿侧面：操场比草地高一点，而不是悬在空中
-  diamond(ctx, 0, BOARD_H / 2 + CURB + 3, BOARD_W + 10, BOARD_H / 2 + 5);
-  ctx.fillStyle = 'rgba(20,50,15,0.28)';
-  ctx.fill();
-  ctx.fillStyle = '#a39c8c';
-  ctx.beginPath();
-  ctx.moveTo(-BOARD_W - 4, BOARD_H / 2);
-  ctx.lineTo(0, BOARD_H + 2);
-  ctx.lineTo(BOARD_W + 4, BOARD_H / 2);
-  ctx.lineTo(BOARD_W + 4, BOARD_H / 2 + CURB);
-  ctx.lineTo(0, BOARD_H + 2 + CURB);
-  ctx.lineTo(-BOARD_W - 4, BOARD_H / 2 + CURB);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = 'rgba(0,0,0,0.12)';
-  ctx.beginPath();
-  ctx.moveTo(0, BOARD_H + 2);
-  ctx.lineTo(BOARD_W + 4, BOARD_H / 2);
-  ctx.lineTo(BOARD_W + 4, BOARD_H / 2 + CURB);
-  ctx.lineTo(0, BOARD_H + 2 + CURB);
-  ctx.closePath();
-  ctx.fill();
-  // 路沿顶面
-  diamond(ctx, 0, BOARD_H / 2, BOARD_W + 4, BOARD_H / 2 + 2);
-  ctx.fillStyle = '#c9c1ae';
-  ctx.fill();
-
-  // 铺砖的操场
-  diamond(ctx, 0, BOARD_H / 2, BOARD_W, BOARD_H / 2);
-  ctx.fillStyle = '#ddd6c6';
-  ctx.fill();
-  ctx.fillStyle = '#d3cbb9';
-  for (let by = 0; by < BSIZE; by++) {
-    for (let bx = 0; bx < BSIZE; bx++) {
-      if ((bx + by) % 2) continue;
-      diamond(ctx, bx * 48 - by * 48, by * 24 + bx * 24 + 24, 48, 24);
-      ctx.fill();
-    }
-  }
-  // 砖缝：大格的线深一点，小格的线很淡
-  ctx.strokeStyle = 'rgba(90,70,40,0.07)';
-  ctx.lineWidth = 0.6;
-  ctx.beginPath();
-  for (let i = 0; i <= SSIZE; i++) {
-    if (i % 4 === 0) continue;
-    ctx.moveTo(-i * 12, i * 6);
-    ctx.lineTo(BOARD_W - i * 12, BOARD_H / 2 + i * 6);
-    ctx.moveTo(i * 12, i * 6);
-    ctx.lineTo(-BOARD_W + i * 12, BOARD_H / 2 + i * 6);
-  }
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(90,70,40,0.16)';
-  ctx.lineWidth = 0.9;
-  ctx.beginPath();
-  for (let i = 0; i <= BSIZE; i++) {
-    ctx.moveTo(-i * 48, i * 24);
-    ctx.lineTo(BOARD_W - i * 48, BOARD_H / 2 + i * 24);
-    ctx.moveTo(i * 48, i * 24);
-    ctx.lineTo(-BOARD_W + i * 48, BOARD_H / 2 + i * 24);
-  }
-  ctx.stroke();
-}
-
-function drawTileCursor(ctx: CanvasRenderingContext2D, bx: number, by: number, color: string): void {
-  diamond(ctx, bx * 48 - by * 48, by * 24 + bx * 24 + 24, 46, 23);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.setLineDash([6, 4]);
-  ctx.stroke();
-  ctx.setLineDash([]);
-}
-
-/** 营地图标：帐篷剪影（中心在原点，半高 s） */
-export function tentPath(ctx: CanvasRenderingContext2D, s: number): void {
-  ctx.beginPath();
-  ctx.moveTo(0, -s);
-  ctx.lineTo(s * 1.05, s * 0.8);
-  ctx.lineTo(s * 0.22, s * 0.8);
-  ctx.lineTo(0, s * 0.18);
-  ctx.lineTo(-s * 0.22, s * 0.8);
-  ctx.lineTo(-s * 1.05, s * 0.8);
-  ctx.closePath();
-}
-
-/** 泉水图标：十字（中心在原点，半宽 s） */
-export function crossPath(ctx: CanvasRenderingContext2D, s: number): void {
-  const w = s * 0.36;
-  ctx.beginPath();
-  ctx.moveTo(-w, -s);
-  ctx.lineTo(w, -s);
-  ctx.lineTo(w, -w);
-  ctx.lineTo(s, -w);
-  ctx.lineTo(s, w);
-  ctx.lineTo(w, w);
-  ctx.lineTo(w, s);
-  ctx.lineTo(-w, s);
-  ctx.lineTo(-w, w);
-  ctx.lineTo(-s, w);
-  ctx.lineTo(-s, -w);
-  ctx.lineTo(-w, -w);
-  ctx.closePath();
-}
-
-const EMBLEM_ZH = ['人', '兽', '矮', '精'];
-const EMBLEM_EN = ['H', 'O', 'D', 'E'];
-
-export function emblem(col: number): string {
-  return (getLang() === 'zh' ? EMBLEM_ZH : EMBLEM_EN)[col] ?? '';
-}
-
-/** 地面层：本部场地、营地 / 泉水地块的底色与进度环 */
-function drawGround(ctx: CanvasRenderingContext2D, g: Game, now: number): void {
-  const font = getComputedFontFamily();
-  for (const a of g.area) {
-    const [x, y] = tileCenter(a.bx, a.by);
-    if (a.areatype === 1) {
-      const c = FACTION[a.col];
-      const alive = g.player[a.col].exist;
-      diamond(ctx, x, y, 48, 24);
-      ctx.fillStyle = !alive ? '#8d9196' : a.fallen ? mix(c.ui, '#8d9196', 0.6) : c.ui;
-      ctx.fill();
-      diamond(ctx, x, y, 40, 20);
-      ctx.strokeStyle = a.fallen ? 'rgba(40,0,0,0.35)' : 'rgba(255,255,255,0.35)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash(a.fallen ? [5, 4] : []);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.save();
-      groundSpace(ctx, x, y);
-      ctx.font = `900 30px ${font}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(255,255,255,0.28)';
-      ctx.fillText(emblem(a.col), 0, 1);
-      if (alive && !a.fallen && settings.showSpawn) {
-        const need = factionSpec(g.rules.ruleset, a.col).appear;
-        const k = Math.min(1, g.player[a.col].appear_cnt / need);
-        ctx.beginPath();
-        ctx.arc(0, 0, 25, -Math.PI / 2, -Math.PI / 2 + k * Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-      }
-      if (settings.showCapture) {
-        // 攻陷进度（敌方）或夺回进度（己方）
-        const need = a.fallen ? RECOVER_VALUE : SIEGE_VALUE;
-        let best = -1;
-        for (let c2 = 0; c2 < 4; c2++) {
-          if (a.val[c2] <= 0) continue;
-          if (a.fallen ? c2 !== a.col : c2 === a.col) continue;
-          if (best < 0 || a.val[c2] > a.val[best]) best = c2;
-        }
-        if (best >= 0) progressRing(ctx, 31, a.val[best] / need, FACTION[best].ui, now);
-      }
-      ctx.restore();
-      continue;
-    }
-    const owner = a.col;
-    diamond(ctx, x, y, 44, 22);
-    ctx.fillStyle = owner >= 0 ? mix('#f6f7f4', FACTION[owner].ui, 0.3) : '#f3f4f1';
-    ctx.fill();
-    ctx.strokeStyle = owner >= 0 ? FACTION[owner].ui : 'rgba(0,0,0,0.12)';
-    ctx.lineWidth = owner >= 0 ? 2 : 1;
-    ctx.stroke();
-    ctx.save();
-    groundSpace(ctx, x, y);
-    // 地面上的淡淡符号，远看也能分辨地块种类：营地是帐篷，泉水是绿十字
-    if (a.areatype === AREA.SPADE) {
-      tentPath(ctx, 15);
-      ctx.fillStyle = owner >= 0 ? FACTION[owner].ui : NEUTRAL;
-    } else {
-      crossPath(ctx, 14);
-      ctx.fillStyle = '#3fbf5a';
-    }
-    ctx.globalAlpha = 0.32;
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    // 占领进度：显示进度最高的非持有阵营
-    if (settings.showCapture) {
-      let best = -1;
-      for (let c = 0; c < 4; c++) if (c !== owner && a.val[c] > 0 && (best < 0 || a.val[c] > a.val[best])) best = c;
-      if (best >= 0) progressRing(ctx, 27, a.val[best] / CAPTURE_VALUE, FACTION[best].ui, now);
-    }
-    ctx.restore();
-  }
-}
-
-function progressRing(ctx: CanvasRenderingContext2D, r: number, k: number, color: string, now: number): void {
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-  ctx.lineWidth = 4;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(0, 0, r, -Math.PI / 2, -Math.PI / 2 + Math.min(1, k) * Math.PI * 2);
-  ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.75 + 0.25 * Math.sin(now / 150);
-  ctx.stroke();
-  ctx.globalAlpha = 1;
-}
-
-/** 地块上方的小旗：占领后 0.6 秒升到顶 */
-function siteFlag(ctx: CanvasRenderingContext2D, x: number, top: number, owner: number, n: number, fx: Fx, now: number): void {
-  if (owner < 0) return;
-  const t0 = fx.raised.get(n);
-  const k = t0 === undefined ? 1 : Math.min(1, (now - t0) / 600);
-  const fy = top - 2 - 8 * k;
-  ctx.strokeStyle = '#4b3a2a';
-  ctx.lineWidth = 0.9;
-  ctx.beginPath();
-  ctx.moveTo(x, top + 1);
-  ctx.lineTo(x, top - 11);
-  ctx.stroke();
-  const wave = Math.sin(now / 200 + n) * 1.2;
-  ctx.beginPath();
-  ctx.moveTo(x, fy);
-  ctx.lineTo(x + 9, fy + 1.5 + wave);
-  ctx.lineTo(x, fy + 4);
-  ctx.closePath();
-  ctx.fillStyle = FACTION[owner].ui;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.lineWidth = 0.7;
-  ctx.stroke();
-}
-
-/** 营地：一顶帐篷，篷布是占领方的颜色 */
-function drawCamp(ctx: CanvasRenderingContext2D, g: Game, n: number, fx: Fx, now: number): void {
-  const a = g.area[n];
-  const [x, y] = tileCenter(a.bx, a.by);
-  const owner = a.col;
-  const base = owner >= 0 ? FACTION[owner].ui : '#d8d2bf';
-  const w = 13;
-  const hgt = 19;
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.beginPath();
-  ctx.ellipse(x + 2, y + 1, w + 3, 5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(20,14,12,0.7)';
-  ctx.lineWidth = 0.9;
-  // 左右两片篷布
-  ctx.beginPath();
-  ctx.moveTo(x, y - hgt);
-  ctx.lineTo(x - w, y);
-  ctx.quadraticCurveTo(x - w / 2, y + 4.5, x, y + 5);
-  ctx.closePath();
-  ctx.fillStyle = mix(base, '#ffffff', 0.18);
-  ctx.fill();
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(x, y - hgt);
-  ctx.lineTo(x + w, y);
-  ctx.quadraticCurveTo(x + w / 2, y + 4.5, x, y + 5);
-  ctx.closePath();
-  ctx.fillStyle = mix(base, '#000000', 0.18);
-  ctx.fill();
-  ctx.stroke();
-  // 门帘
-  ctx.beginPath();
-  ctx.moveTo(x - 1.5, y - 8);
-  ctx.lineTo(x - 5.5, y + 3.2);
-  ctx.lineTo(x + 0.5, y + 4.8);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(30,20,15,0.75)';
-  ctx.fill();
-  // 篷布上的缝线
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 0.6;
-  ctx.beginPath();
-  ctx.moveTo(x, y - hgt + 2);
-  ctx.lineTo(x - w / 2 - 1, y + 2);
-  ctx.moveTo(x, y - hgt + 2);
-  ctx.lineTo(x + w / 2 + 1, y + 2);
-  ctx.stroke();
-  if (settings.colorblind && owner >= 0) {
-    ctx.font = `900 6px ${getComputedFontFamily()}`;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#fff';
-    ctx.fillText(emblem(owner), x + 6, y - 2);
-  }
-  siteFlag(ctx, x, y - hgt, owner, n, fx, now);
-}
-
-/** 泉水：一口石砌小泉，水面闪光；上方浮着绿十字，归属看石沿的颜色和小旗 */
-function drawSpring(ctx: CanvasRenderingContext2D, g: Game, n: number, fx: Fx, now: number): void {
-  const a = g.area[n];
-  const [x, y] = tileCenter(a.bx, a.by);
-  const owner = a.col;
-  const rx = 13;
-  const ry = 6.5;
-  const h = 4;
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.beginPath();
-  ctx.ellipse(x + 2, y + 2, rx + 2, ry + 1.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // 石沿侧面与顶面
-  ctx.beginPath();
-  ctx.ellipse(x, y + h, rx, ry, 0, 0, Math.PI);
-  ctx.lineTo(x - rx, y);
-  ctx.ellipse(x, y, rx, ry, 0, Math.PI, 0, true);
-  ctx.closePath();
-  ctx.fillStyle = '#8f8a80';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(20,14,12,0.6)';
-  ctx.lineWidth = 0.8;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
-  ctx.fillStyle = '#bdb6a8';
-  ctx.fill();
-  ctx.lineWidth = owner >= 0 ? 2.2 : 0.8;
-  ctx.strokeStyle = owner >= 0 ? FACTION[owner].ui : 'rgba(20,14,12,0.6)';
-  ctx.stroke();
-  // 水面
-  ctx.beginPath();
-  ctx.ellipse(x, y, rx - 3, ry - 1.8, 0, 0, Math.PI * 2);
-  const wg = ctx.createLinearGradient(x - rx, y - ry, x + rx, y + ry);
-  wg.addColorStop(0, '#9fe6ff');
-  wg.addColorStop(1, '#2f8fd0');
-  ctx.fillStyle = wg;
-  ctx.fill();
-  const sh = (now / 1400 + n * 0.3) % 1;
-  ctx.strokeStyle = `rgba(255,255,255,${0.7 * (1 - sh)})`;
-  ctx.lineWidth = 0.8;
-  ctx.beginPath();
-  ctx.ellipse(x, y, (rx - 4) * sh + 1, (ry - 2.5) * sh + 0.5, 0, 0, Math.PI * 2);
-  ctx.stroke();
-  // 浮在上方的十字
-  const bob = Math.sin(now / 400 + n) * 1.5;
-  ctx.save();
-  ctx.translate(x, y - 15 + bob);
-  crossPath(ctx, 5);
-  ctx.fillStyle = owner >= 0 ? '#5fe36f' : '#cfd3cf';
-  ctx.fill();
-  ctx.strokeStyle = owner >= 0 ? 'rgba(10,70,25,0.9)' : 'rgba(60,60,60,0.7)';
-  ctx.lineWidth = 0.9;
-  ctx.stroke();
-  ctx.restore();
-  if (settings.colorblind && owner >= 0) {
-    ctx.font = `900 6px ${getComputedFontFamily()}`;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#fff';
-    ctx.fillText(emblem(owner), x + rx - 2, y + 2);
-  }
-  siteFlag(ctx, x - rx + 2, y - 3, owner, n, fx, now);
-}
-
-const SCHOOL_W = 30;
-const SCHOOL_D = 15;
-const SCHOOL_H = 24;
-
-/** 校舍立在本部所在的棋盘外角之外；返回地基中心 */
-export function schoolAnchor(bx: number, by: number): [number, number] {
-  const ox = bx === by ? 0 : bx > by ? 1 : -1;
-  const oy = bx === by ? (bx === 0 ? -1 : 1) : 0;
-  const vx = ox * BOARD_W;
-  const vy = BOARD_H / 2 + oy * (BOARD_H / 2);
-  return [vx + ox * (SCHOOL_W + 8), vy + oy * (SCHOOL_D + 8) + (oy > 0 ? CURB : 0)];
-}
-
-/** 世界坐标点是否落在校舍上（含屋顶和旗杆） */
-export function hitSchool(bx: number, by: number, wx: number, wy: number): boolean {
-  const [cx, cy] = schoolAnchor(bx, by);
-  return Math.abs(wx - cx) <= SCHOOL_W + 2 && wy >= cy - SCHOOL_H - 56 && wy <= cy + SCHOOL_D;
-}
-
-/** 各种族校舍的墙面颜色 */
-const WALLS: [string, string][] = [
-  ['#e9e4d8', '#cfc8b8'], // 人族：原版教学楼
-  ['#9a6638', '#7a4d27'], // 兽人：木屋
-  ['#b2b5b9', '#8f9398'], // 矮人：石堡
-  ['#f6f3ec', '#dcd8ce'], // 精灵：白墙
-];
-
-/** 两面墙（左墙向右下、右墙向右上） */
-function walls(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number, d: number, hgt: number, l: string, r: string): void {
-  ctx.strokeStyle = 'rgba(20,14,12,0.6)';
-  ctx.lineWidth = 0.8;
-  ctx.beginPath();
-  ctx.moveTo(cx - w, cy);
-  ctx.lineTo(cx, cy + d);
-  ctx.lineTo(cx, cy + d - hgt);
-  ctx.lineTo(cx - w, cy - hgt);
-  ctx.closePath();
-  ctx.fillStyle = l;
-  ctx.fill();
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx, cy + d);
-  ctx.lineTo(cx + w, cy);
-  ctx.lineTo(cx + w, cy - hgt);
-  ctx.lineTo(cx, cy + d - hgt);
-  ctx.closePath();
-  ctx.fillStyle = r;
-  ctx.fill();
-  ctx.stroke();
-}
-
-/** 墙面上沿等距方向的一条线（k 从 0 到 1 横穿墙面，h 为离地高度） */
-function wallLine(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number, d: number, h: number, left: boolean): void {
-  if (left) {
-    ctx.moveTo(cx - w, cy - h);
-    ctx.lineTo(cx, cy + d - h);
-  } else {
-    ctx.moveTo(cx, cy + d - h);
-    ctx.lineTo(cx + w, cy - h);
-  }
-}
-
-/** 校舍：各种族一种风格，屋顶 / 旗帜是阵营色；沦陷时插上攻陷方的旗子 */
-function drawSchool(ctx: CanvasRenderingContext2D, g: Game, a: Area, now: number): void {
-  const col = a.col;
-  const c = FACTION[col];
-  const alive = g.player[col].exist;
-  const w = SCHOOL_W;
-  const d = SCHOOL_D;
-  const hgt = col === 3 ? SCHOOL_H + 2 : col === 2 ? SCHOOL_H - 2 : SCHOOL_H;
-  const [cx, cy] = schoolAnchor(a.bx, a.by);
-  const grey = !alive || a.fallen;
-  const tone = (v: string) => (grey ? mix(v, '#8d9196', 0.6) : v);
-  const [wl, wr] = WALLS[col];
-  const roof = alive ? (a.fallen ? mix(c.ui, '#666', 0.55) : c.ui) : '#777b80';
-  schoolYard(ctx, col, cx, cy, w, d);
-  // 影子
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  diamond(ctx, cx + 4, cy + 2, w + 2, d + 1);
-  ctx.fill();
-  walls(ctx, cx, cy, w, d, hgt, tone(wl), tone(wr));
-
-  // 墙面细节
-  ctx.save();
-  if (col === 1) {
-    // 木板缝
-    ctx.strokeStyle = 'rgba(40,20,5,0.45)';
-    ctx.lineWidth = 0.6;
-    ctx.beginPath();
-    for (let h = 5; h < hgt; h += 5) {
-      wallLine(ctx, cx, cy, w, d, h, true);
-      wallLine(ctx, cx, cy, w, d, h, false);
-    }
-    ctx.stroke();
-  } else if (col === 2) {
-    // 石块
-    ctx.strokeStyle = 'rgba(40,40,48,0.35)';
-    ctx.lineWidth = 0.6;
-    ctx.beginPath();
-    for (let h = 5; h < hgt; h += 5) {
-      wallLine(ctx, cx, cy, w, d, h, true);
-      wallLine(ctx, cx, cy, w, d, h, false);
-      const off = (h / 5) % 2 ? 0.5 : 0;
-      for (let k = 0.2 + off * 0.2; k < 1; k += 0.2) {
-        ctx.moveTo(cx - w + w * k, cy + d * k - h);
-        ctx.lineTo(cx - w + w * k, cy + d * k - h + 5);
-        ctx.moveTo(cx + w * k, cy + d - d * k - h);
-        ctx.lineTo(cx + w * k, cy + d - d * k - h + 5);
-      }
-    }
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  // 窗户
-  ctx.fillStyle = grey ? '#5d6166' : col === 1 ? '#2a1a0e' : col === 3 ? '#7fe0c8' : '#5d86b8';
-  const rows = col === 2 ? 1 : 2;
-  for (let row = 0; row < rows; row++) {
-    for (let i = 0; i < 3; i++) {
-      const k = (i + 0.5) / 3;
-      const wy = -hgt + 6 + row * 9 + (col === 2 ? 5 : 0);
-      win(ctx, cx - w + w * k, cy + d * k + wy, -1, col === 3);
-      win(ctx, cx + w * k, cy + d - d * k + wy, 1, col === 3);
-    }
-  }
-
-  const ry = cy - hgt;
-  let apexY = ry - 13;
-  if (col === 2) {
-    apexY = flatRoof(ctx, cx, ry, w, d, tone('#a1a5ab'), roof, now, grey);
-  } else {
-    const rise = col === 3 ? 38 : col === 1 ? 17 : 13;
-    apexY = ry - rise;
-    hipRoof(ctx, cx, ry, w, d, apexY, roof, col === 1 ? 4 : 2);
-    if (col === 1) {
-      // 兽人：屋脊两端的獠牙
-      ctx.strokeStyle = 'rgba(20,14,12,0.7)';
-      ctx.lineWidth = 0.7;
-      for (const sx of [-1, 1]) {
-        ctx.beginPath();
-        ctx.moveTo(cx + sx * 2, apexY + 2);
-        ctx.quadraticCurveTo(cx + sx * 9, apexY - 1, cx + sx * 8, apexY - 9);
-        ctx.quadraticCurveTo(cx + sx * 6, apexY - 2, cx + sx * 1, apexY + 4);
-        ctx.closePath();
-        ctx.fillStyle = '#f3ecd6';
-        ctx.fill();
-        ctx.stroke();
-      }
-    } else if (col === 3) {
-      // 精灵：墙上的藤蔓
-      ctx.fillStyle = grey ? '#7a8a7a' : '#4fae5a';
-      for (let i = 0; i < 9; i++) {
-        const k = (i + 0.5) / 9;
-        const yy = ry + 2 + Math.sin(i * 1.7) * 2.5;
-        ctx.beginPath();
-        ctx.arc(cx - w + w * k, yy + d * k, 1.5, 0, Math.PI * 2);
-        ctx.arc(cx + w * k, yy + d - d * k, 1.3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
-  // 校徽字
-  ctx.font = `900 9px ${getComputedFontFamily()}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  if (col === 2) ctx.fillText(emblem(col), cx - w / 2, cy + d / 2 - hgt + 8);
-  else ctx.fillText(emblem(col), cx - w / 2, ry + d / 2 - 3);
-  ctx.textBaseline = 'alphabetic';
-  // 旗杆与旗子：平时是自己的校旗，沦陷时换成攻陷方的
-  const flagCol = a.fallen && a.holder >= 0 ? a.holder : alive ? col : -1;
-  if (flagCol >= 0) {
-    ctx.strokeStyle = '#3d3a36';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cx, apexY);
-    ctx.lineTo(cx, apexY - 18);
-    ctx.stroke();
-    const wave = Math.sin(now / 180) * 1.5;
-    ctx.beginPath();
-    ctx.moveTo(cx, apexY - 18);
-    ctx.quadraticCurveTo(cx + 7, apexY - 18 + wave, cx + 13, apexY - 15);
-    ctx.lineTo(cx, apexY - 11);
-    ctx.closePath();
-    ctx.fillStyle = FACTION[flagCol].ui;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-    ctx.stroke();
-  }
-}
-
-/** 四坡屋顶（人族、兽人）；顶点更高就是精灵的尖塔 */
-function hipRoof(ctx: CanvasRenderingContext2D, cx: number, ry: number, w: number, d: number, apexY: number, roof: string, eave: number): void {
-  ctx.strokeStyle = 'rgba(20,14,12,0.6)';
-  ctx.lineWidth = 0.8;
-  ctx.fillStyle = mix(roof, '#000000', 0.25);
-  ctx.beginPath();
-  ctx.moveTo(cx - w - eave, ry);
-  ctx.lineTo(cx, ry - d - 1);
-  ctx.lineTo(cx + w + eave, ry);
-  ctx.lineTo(cx, apexY);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(cx - w - eave, ry);
-  ctx.lineTo(cx, ry + d + 1);
-  ctx.lineTo(cx, apexY);
-  ctx.closePath();
-  ctx.fillStyle = roof;
-  ctx.fill();
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx, ry + d + 1);
-  ctx.lineTo(cx + w + eave, ry);
-  ctx.lineTo(cx, apexY);
-  ctx.closePath();
-  ctx.fillStyle = mix(roof, '#000000', 0.15);
-  ctx.fill();
-  ctx.stroke();
-}
-
-/** 矮人石堡：平顶加城垛，一侧有冒烟的烟囱，正面挂阵营色的长幡；返回旗杆底部的高度 */
-function flatRoof(
-  ctx: CanvasRenderingContext2D, cx: number, ry: number, w: number, d: number, stone: string, banner: string, now: number, grey: boolean,
-): number {
-  diamond(ctx, cx, ry, w, d);
-  ctx.fillStyle = mix(stone, '#000000', 0.1);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(20,14,12,0.6)';
-  ctx.lineWidth = 0.8;
-  ctx.stroke();
-  // 城垛：沿两条前沿的一排小方块
-  ctx.fillStyle = stone;
-  for (let i = 0; i <= 6; i++) {
-    const k = i / 6;
-    for (const [x, y] of [[cx - w + w * k, ry + d * k], [cx + w * k, ry + d - d * k]]) {
-      ctx.beginPath();
-      ctx.rect(x - 2, y - 4, 4, 4);
-      ctx.fill();
-      ctx.stroke();
-    }
-  }
-  // 烟囱和烟
-  const chx = cx + w * 0.45;
-  const chy = ry - d * 0.2;
-  ctx.fillStyle = '#7d6a5a';
-  ctx.beginPath();
-  ctx.rect(chx - 3, chy - 12, 6, 12);
-  ctx.fill();
-  ctx.stroke();
-  if (!grey) {
-    for (let i = 0; i < 3; i++) {
-      const k = ((now / 2200 + i / 3) % 1);
-      ctx.globalAlpha = 0.45 * (1 - k);
-      ctx.fillStyle = '#e8e8e8';
-      ctx.beginPath();
-      ctx.arc(chx + k * 6, chy - 14 - k * 16, 2.5 + k * 3, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  }
-  // 正面长幡
-  const bx = cx - w * 0.5;
-  const by = ry + d * 0.5;
-  ctx.beginPath();
-  ctx.moveTo(bx - 4, by + 1);
-  ctx.lineTo(bx + 4, by + 5);
-  ctx.lineTo(bx + 4, by + 15);
-  ctx.lineTo(bx, by + 11);
-  ctx.lineTo(bx - 4, by + 11);
-  ctx.closePath();
-  ctx.fillStyle = banner;
-  ctx.fill();
-  ctx.stroke();
-  return ry - d * 0.15 - 3;
-}
-
-/** 墙面上的平行四边形小窗；side < 0 为左墙（向右下倾斜），否则为右墙；arch 为精灵的拱形窗 */
-function win(ctx: CanvasRenderingContext2D, x: number, y: number, side: number, arch = false): void {
-  const slope = side < 0 ? 0.5 : -0.5;
-  ctx.beginPath();
-  ctx.moveTo(x - 2.5, y - 2.5 * slope);
-  if (arch) ctx.quadraticCurveTo(x, y - 4, x + 2.5, y + 2.5 * slope);
-  else ctx.lineTo(x + 2.5, y + 2.5 * slope);
-  ctx.lineTo(x + 2.5, y + 2.5 * slope + 4);
-  ctx.lineTo(x - 2.5, y - 2.5 * slope + 4);
-  ctx.closePath();
-  ctx.fill();
 }
 
 /** 集结点：从本部到集结点的虚线和一面小旗 */
-function drawRally(ctx: CanvasRenderingContext2D, g: Game, view: ViewState, now: number): void {
+function drawRally(a: CanvasRenderingContext2D, g: Game, view: ViewState, now: number): void {
   const me = view.me ?? g.user_col;
   const pl = g.player[me];
-  if (!pl || pl.rally_bx < 0) {
-    if (view.baseSelected && pl) {
-      const [x, y] = tileCenter(pl.basex, pl.basey);
-      diamond(ctx, x, y, 47, 23.5);
-      ctx.strokeStyle = 'rgba(120,255,200,0.95)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-    return;
+  if (!pl) return;
+  if (view.baseSelected) {
+    const [x, y] = tileCenter(pl.basex, pl.basey);
+    pxDiamondEdge(a, x, y, 47, 23.5, '#78ffc8');
   }
+  if (pl.rally_bx < 0) return;
   const [x0, y0] = tileCenter(pl.basex, pl.basey);
   const [x1, y1] = tileCenter(pl.rally_bx, pl.rally_by);
-  const color = FACTION[me].ui;
-  ctx.save();
-  ctx.globalAlpha = view.baseSelected ? 0.95 : 0.45;
-  ctx.setLineDash([5, 5]);
-  ctx.lineDashOffset = -now / 60;
-  ctx.strokeStyle = view.baseSelected ? 'rgba(120,255,200,0.95)' : '#ffffff';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(x0, y0);
-  ctx.lineTo(x1, y1);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  if (view.baseSelected) {
-    diamond(ctx, x0, y0, 47, 23.5);
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-  ctx.globalAlpha = 1;
-  ctx.strokeStyle = '#3d3a36';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(x1, y1 - 20);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(x1, y1 - 20);
-  ctx.lineTo(x1 + 10, y1 - 17 + Math.sin(now / 200));
-  ctx.lineTo(x1, y1 - 13);
-  ctx.closePath();
-  ctx.fillStyle = color;
-  ctx.fill();
-  ctx.strokeStyle = '#fff';
-  ctx.stroke();
-  ctx.restore();
+  pxLine(a, x0, y0, x1, y1, view.baseSelected ? '#78ffc8' : 'rgba(255,255,255,0.55)', 8, -Math.floor(now / 90));
+  const X = Math.round(x1 * ART);
+  const Y = Math.round(y1 * ART);
+  a.fillStyle = '#3d3a36';
+  a.fillRect(X / ART, (Y - 11) / ART, 1 / ART, 11 / ART);
+  const wave = Math.floor(now / 220) % 2;
+  a.fillStyle = '#ffffff';
+  a.fillRect((X + 1) / ART, (Y - 12) / ART, 6 / ART, 6 / ART);
+  a.fillStyle = FACTION[me].ui;
+  a.fillRect((X + 1) / ART, (Y - 11) / ART, (5 - wave) / ART, 4 / ART);
 }
 
-function mix(a: string, b: string, k: number): string {
-  const pa = parseHex(a);
-  const pb = parseHex(b);
-  const ch = (i: number) => Math.round(pa[i] * (1 - k) + pb[i] * k);
-  return `rgb(${ch(0)},${ch(1)},${ch(2)})`;
+// ---- 特效 ----
+
+const SPARK = [[1, 0], [0, 1], [-1, 0], [0, -1], [0.7, 0.7], [-0.7, 0.7], [-0.7, -0.7], [0.7, -0.7]];
+
+function drawEffects(a: CanvasRenderingContext2D, g: Game, ip: Interp, fx: Fx, now: number, fog: FogView | null): void {
+  const visible = (x: number, y: number) => {
+    if (!fog) return true;
+    const [cx, cy] = worldToCell(x, y);
+    return fog.point(cx, cy);
+  };
+  // 出拳火花：一圈向外飞的像素点
+  fx.impacts = fx.impacts.filter((f) => now - f.t0 < 260);
+  for (const f of fx.impacts) {
+    if (!visible(f.x, f.y)) continue;
+    const k = (now - f.t0) / 260;
+    const r = 3 + k * (f.big ? 14 : 9);
+    const X = Math.round(f.x * ART);
+    const Y = Math.round((f.y - 22) * ART);
+    a.fillStyle = k < 0.5 || f.big ? '#ffffff' : '#ffe680';
+    for (let i = 0; i < (f.big ? 8 : 4); i++) {
+      const [dx, dy] = SPARK[i];
+      const px = X + Math.round(dx * r * ART);
+      const py = Y + Math.round(dy * r * ART * 0.8);
+      a.fillRect(px / ART, py / ART, (k < 0.5 ? 2 : 1) / ART, (k < 0.5 ? 2 : 1) / ART);
+    }
+    if (k < 0.3) a.fillRect((X - 1) / ART, (Y - 1) / ART, 3 / ART, 3 / ART);
+  }
+
+  // 击倒：头上转圈的星星
+  fx.kos = fx.kos.filter((f) => now - f.t0 < 1400);
+  for (const f of fx.kos) {
+    if (!visible(f.x, f.y)) continue;
+    const k = (now - f.t0) / 1400;
+    if (k > 0.75 && Math.floor(now / 80) % 2) continue;
+    for (let i = 0; i < 3; i++) {
+      const ang = now / 220 + (i * Math.PI * 2) / 3;
+      blit(a, starIcon(), f.x + Math.cos(ang) * 12, f.y - 18 + Math.sin(ang) * 4);
+    }
+  }
+
+  // 飘字
+  fx.texts = fx.texts.filter((f) => now - f.t0 < 800);
+  for (const f of fx.texts) {
+    if (!visible(f.x, f.y)) continue;
+    const k = (now - f.t0) / 800;
+    if (k > 0.7 && Math.floor(now / 70) % 2) continue;
+    pxText(a, f.text, f.x + 8, f.y - 52 - Math.round(k * 8) * 2, f.color ?? '#bfe6ff');
+  }
+
+  // 升级：脚下光圈扩散、光柱升起、金色碎光上飘、头顶飘字；得星时一颗大星落到头顶
+  fx.levelups = fx.levelups.filter((f) => now - f.t0 < 1300);
+  for (const f of fx.levelups) {
+    if (g.people[f.pn].stat <= PS.DEAD) continue;
+    if (fog && !fog.unit(g, f.pn)) continue;
+    const k = (now - f.t0) / 1300;
+    const [x, y] = unitPos(g, ip, f.pn);
+    const fy = y + 6;
+    for (const delay of [0, 0.12]) {
+      const kk = (k - delay) / 0.45;
+      if (kk <= 0 || kk >= 1) continue;
+      pxEllipse(a, x, fy, 8 + kk * 22, 4 + kk * 11, f.star ? '#fff3a0' : '#ffd84a', 1);
+    }
+    if (k < 0.6) {
+      const al = k < 0.15 ? k / 0.15 : 1 - (k - 0.15) / 0.45;
+      const hgt = 56 + (f.star ? 18 : 0);
+      for (let i = 0; i < 4; i++) {
+        a.fillStyle = `rgba(255,225,110,${(al * (0.25 + i * 0.12)).toFixed(2)})`;
+        const X = Math.round(x * ART);
+        const top = Math.round((fy - hgt * (1 - i * 0.2)) * ART);
+        a.fillRect((X - 4 + i) / ART, top / ART, (8 - 2 * i) / ART, (Math.round(fy * ART) - top) / ART);
+      }
+    }
+    for (let i = 0; i < 8; i++) {
+      const ph = (i * 0.618 + f.pn * 0.37) % 1;
+      const kk = k * 1.4 - ph * 0.3;
+      if (kk <= 0 || kk >= 1) continue;
+      const ang = (i / 8) * Math.PI * 2;
+      pxRect(a, x + Math.cos(ang) * (8 + kk * 8), fy - 8 - kk * 40 + Math.sin(ang) * 3, 1, 1, '#fff1a8');
+    }
+    if (k < 0.75 || Math.floor(now / 70) % 2 === 0) {
+      const ty = y - 76 - Math.round(Math.min(1, k * 2) * 6) * 2;
+      pxText(a, f.star ? t('msg.star') : t('msg.levelup'), x, ty, '#ffd84a', '#3a1b00');
+    }
+    if (f.star && k < 0.8) {
+      const kk = Math.min(1, k / 0.5);
+      const ease = 1 - (1 - kk) * (1 - kk);
+      blit(a, starIcon(ease < 1), x, y - 100 + ease * 40);
+    }
+  }
 }
 
-function parseHex(c: string): [number, number, number] {
-  if (c.startsWith('rgb')) {
-    const m = c.match(/\d+/g) ?? ['0', '0', '0'];
-    return [Number(m[0]), Number(m[1]), Number(m[2])];
-  }
-  const v = parseInt(c.slice(1), 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-}
+// ---- 小地图 ----
 
 export interface MinimapRect {
   x: number;
@@ -1235,88 +772,129 @@ export interface MinimapRect {
   oy: number;
 }
 
-function drawMinimap(ctx: CanvasRenderingContext2D, g: Game, cam: Camera, fx: Fx, now: number, me: number): MinimapRect {
-  const w = Math.round(Math.min(260, Math.max(170, cam.w * 0.2)));
-  const s = w / (BOARD_W * 2 + 40);
-  const h = Math.round((BOARD_H + 40) * s);
-  const x0 = cam.w - w - 14;
-  const y0 = cam.h - h - 14;
-  ctx.fillStyle = 'rgba(28,58,24,0.85)';
-  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-  ctx.lineWidth = 1;
-  roundRect(ctx, x0, y0, w, h, 8);
-  ctx.fill();
-  ctx.stroke();
-  const ox = x0 + w / 2;
-  const oy = y0 + 20 * s;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x0, y0, w, h);
-  ctx.clip();
-  diamond(ctx, ox, oy + (BOARD_H / 2) * s, BOARD_W * s, (BOARD_H / 2) * s);
-  ctx.fillStyle = '#6d6a62';
-  ctx.fill();
-  ctx.font = `900 ${Math.max(7, Math.round(40 * s))}px ${getComputedFontFamily()}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  for (const a of g.area) {
-    const cx = ox + (a.bx * 48 - a.by * 48) * s;
-    const cy = oy + (a.by * 24 + a.bx * 24 + 24) * s;
-    diamond(ctx, cx, cy, 48 * s, 24 * s);
-    ctx.fillStyle = a.col >= 0 ? FACTION[a.col].ui : '#8b9097';
-    ctx.globalAlpha = a.areatype === 1 ? (a.fallen ? 0.45 : 0.9) : 0.55;
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    if (settings.colorblind && a.col >= 0) {
-      ctx.fillStyle = '#fff';
-      ctx.fillText(emblem(a.col), cx, cy + 0.5);
+/** 小地图：每个大格 12×6 像素的小菱形，按整数倍放大贴到屏幕右下角 */
+const MM_TILE = 12;
+const MM_PAD = 6;
+let mmCanvas: HTMLCanvasElement | null = null;
+
+function drawMinimap(
+  ctx: CanvasRenderingContext2D, g: Game, cam: Camera, fx: Fx, now: number, me: number, fog: FogView | null, dpr: number,
+): MinimapRect {
+  const bw = BSIZE * MM_TILE;
+  const bh = BSIZE * (MM_TILE / 2);
+  const w = bw + MM_PAD * 2;
+  const h = bh + MM_PAD * 2;
+  if (!mmCanvas) {
+    mmCanvas = document.createElement('canvas');
+    mmCanvas.width = w;
+    mmCanvas.height = h;
+  }
+  const m = mmCanvas.getContext('2d')!;
+  m.clearRect(0, 0, w, h);
+  m.fillStyle = '#1e3a1a';
+  m.fillRect(1, 0, w - 2, h);
+  m.fillRect(0, 1, w, h - 2);
+  m.fillStyle = '#2c5426';
+  m.fillRect(2, 1, w - 4, h - 2);
+  m.fillRect(1, 2, w - 2, h - 4);
+  const ox = MM_PAD + bw / 2;
+  const oy = MM_PAD;
+  const half = MM_TILE / 2;
+  const q = MM_TILE / 4;
+  const on = !!fog && fog.enabled;
+  for (let tIdx = 0; tIdx < BSIZE * BSIZE; tIdx++) {
+    const bx = tIdx % BSIZE;
+    const by = (tIdx - bx) / BSIZE;
+    const cx = ox + (bx - by) * half;
+    const cy = oy + (bx + by) * q + q;
+    const n = g.bmap_n[tIdx];
+    const owner = on
+      ? fog!.owner(g, tIdx)
+      : n >= 0 ? (g.area[n].fallen ? g.area[n].holder : g.area[n].col) : g.rules.ruleset === 'remake' ? g.terr[tIdx] : -1;
+    let color = (bx + by) % 2 ? '#7c786e' : '#87837a';
+    if (owner >= 0) color = n >= 0 && g.area[n].areatype !== AREA.BASE ? mixRgb(FACTION[owner].ui, '#ffffff', 0.3) : FACTION[owner].ui;
+    else if (n >= 0) color = '#b5b9b6';
+    if (on) {
+      const st = fog!.tile(tIdx);
+      if (st === FOG.DARK) color = '#1a1e2a';
+      else if (st === FOG.MEMORY) color = mixRgb(color, '#141826', 0.45);
+    }
+    m.fillStyle = color;
+    for (let r = 0; r < MM_TILE / 2; r++) {
+      const k = r < q ? r + 1 : MM_TILE / 2 - r;
+      m.fillRect(cx - k * 2, cy - q + r, k * 4, 1);
     }
   }
-  for (const p of g.people) {
+  for (let i = 0; i < PMAX; i++) {
+    const p = g.people[i];
     if (p.stat <= PS.DEAD) continue;
-    const dx = ox + p.px * s;
-    const dy = oy + (p.py + 6) * s;
-    ctx.fillStyle = p.col === me ? '#ffffff' : FACTION[p.col].ui;
-    ctx.fillRect(dx - 1.5, dy - 1.5, 3, 3);
-    if (p.col === me) {
-      ctx.fillStyle = FACTION[p.col].ui;
-      ctx.fillRect(dx - 0.8, dy - 0.8, 1.6, 1.6);
-    }
+    if (on && !fog!.unit(g, i)) continue;
+    const dx = Math.round(ox + (p.px * MM_TILE) / 96);
+    const dy = Math.round(oy + ((p.py + 6) * MM_TILE) / 96);
+    m.fillStyle = '#140c10';
+    m.fillRect(dx - 1, dy - 1, 3, 3);
+    m.fillStyle = p.col === me ? '#ffffff' : FACTION[p.col].ui;
+    if (p.col === me) m.fillRect(dx - 1, dy - 1, 2, 2);
+    else m.fillRect(dx, dy, 1, 1);
+  }
+  // 下课铃
+  const b = g.bell;
+  if (g.rules.ruleset === 'remake' && b.bx >= 0 && g.tick < b.until && Math.floor(now / 300) % 2 === 0) {
+    m.fillStyle = '#ffd84a';
+    m.fillRect(ox + (b.bx - b.by) * half - 2, oy + (b.bx + b.by) * q + q - 2, 4, 4);
   }
   // 警报光圈
   fx.pings = fx.pings.filter((f) => now - f.t0 < 3000);
   for (const f of fx.pings) {
     const k = ((now - f.t0) % 1000) / 1000;
-    const cx = ox + (f.bx * 48 - f.by * 48) * s;
-    const cy = oy + (f.by * 24 + f.bx * 24 + 24) * s;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 3 + k * 12, 0, Math.PI * 2);
-    ctx.strokeStyle = f.color;
-    ctx.globalAlpha = 1 - k;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    const cx = ox + (f.bx - f.by) * half;
+    const cy = oy + (f.bx + f.by) * q + q;
+    const r = Math.round(2 + k * 10);
+    m.fillStyle = f.color;
+    m.globalAlpha = 1 - k;
+    for (let i = 0; i < 16; i++) {
+      const ang = (i / 16) * Math.PI * 2;
+      m.fillRect(Math.round(cx + Math.cos(ang) * r), Math.round(cy + Math.sin(ang) * r * 0.6), 1, 1);
+    }
+    m.globalAlpha = 1;
   }
+  // 当前视野框
+  const s = MM_TILE / 96;
   const [wx0, wy0] = cam.toWorld(0, 0);
   const [wx1, wy1] = cam.toWorld(cam.w, cam.h);
-  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(ox + wx0 * s, oy + wy0 * s, (wx1 - wx0) * s, (wy1 - wy0) * s);
-  ctx.restore();
-  return { x: x0, y: y0, w, h, s, ox, oy };
+  const rx0 = Math.max(1, Math.round(ox + wx0 * s));
+  const ry0 = Math.max(1, Math.round(oy + wy0 * s));
+  const rx1 = Math.min(w - 2, Math.round(ox + wx1 * s));
+  const ry1 = Math.min(h - 2, Math.round(oy + wy1 * s));
+  m.fillStyle = '#ffffff';
+  m.fillRect(rx0, ry0, rx1 - rx0 + 1, 1);
+  m.fillRect(rx0, ry1, rx1 - rx0 + 1, 1);
+  m.fillRect(rx0, ry0, 1, ry1 - ry0 + 1);
+  m.fillRect(rx1, ry0, 1, ry1 - ry0 + 1);
+
+  // 屏幕上放大到整数倍（宽度约占屏幕 1/5）
+  const zoom = Math.max(1, Math.round(Math.min(260, Math.max(170, cam.w * 0.2)) / w));
+  const x0 = Math.round((cam.w - w * zoom - 14) * dpr) / dpr;
+  const y0 = Math.round((cam.h - h * zoom - 14) * dpr) / dpr;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(mmCanvas, x0, y0, w * zoom, h * zoom);
+  ctx.imageSmoothingEnabled = true;
+  return { x: x0, y: y0, w: w * zoom, h: h * zoom, s: s * zoom, ox: x0 + ox * zoom, oy: y0 + oy * zoom };
 }
 
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+function mixRgb(a: string, b: string, k: number): string {
+  const pa = rgb(a);
+  const pb = rgb(b);
+  const ch = (i: number) => Math.round(pa[i] * (1 - k) + pb[i] * k);
+  return `rgb(${ch(0)},${ch(1)},${ch(2)})`;
 }
 
 /** 小地图坐标 → 世界坐标 */
 export function minimapToWorld(mm: { ox: number; oy: number; s: number }, sx: number, sy: number): [number, number] {
   return [(sx - mm.ox) / mm.s, (sy - mm.oy) / mm.s];
+}
+
+/** 这一小格此刻是否看得见（界面判断能不能点到敌人） */
+export function cellVisible(fog: FogView | null | undefined, cx: number, cy: number): boolean {
+  return !fog || cx < 0 || cy < 0 || cx >= SSIZE || cy >= SSIZE || fog.cellAt(cx, cy) === FOG.SEEN;
 }

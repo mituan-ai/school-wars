@@ -8,6 +8,8 @@ export interface Settings {
   lang: Lang;
   ruleset: RuleSet;
   difficulty: Difficulty;
+  /** 战争迷雾（仅校园战争规则） */
+  fog: boolean;
   colorblind: boolean;
   controls: 'modern' | 'classic';
   volume: number;
@@ -23,6 +25,7 @@ const defaults: Settings = {
   lang: 'zh',
   ruleset: 'remake',
   difficulty: 'normal',
+  fog: true,
   colorblind: false,
   controls: 'modern',
   volume: 0.6,
@@ -46,7 +49,8 @@ function load(): Settings {
 
 /** 新对局使用的规则 */
 export function newGameRules(): Rules {
-  return settings.ruleset === 'classic' ? structuredClone(CLASSIC_RULES) : remakeRules(settings.difficulty);
+  if (settings.ruleset === 'classic') return structuredClone(CLASSIC_RULES);
+  return { ...remakeRules(settings.difficulty), fog: settings.fog };
 }
 
 export function saveSettings(): void {

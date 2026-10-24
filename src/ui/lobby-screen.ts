@@ -157,6 +157,10 @@ export class LobbyScreen {
         h('button', { class: 'btn small ghost', onClick: () => void navigator.clipboard?.writeText(invite) }, t('net.copy'))),
       h('div', { class: 'lobby-box' },
         h('div', { class: 'row' }, h('span', { class: 'label' }, t('net.mode')), modeBtn('server'), modeBtn('host')),
+        r.ruleset === 'remake'
+          ? h('label', { class: 'row' }, h('span', { class: 'label' }, t('settings.fog')),
+            h('input', { type: 'checkbox', checked: r.fog !== false, disabled: !owner || !lobby, onChange: (e: Event) => send({ t: 'config', fog: (e.target as HTMLInputElement).checked }) }))
+          : null,
         h('div', { class: 'mode-desc' }, t(`net.mode.${r.mode}.desc` as TextKey)),
         r.mode === 'host' ? h('div', { class: 'row' }, h('span', { class: 'label' }, t('net.host')), hostSel) : null,
         h('div', { class: 'advice' }, advice(r))),

@@ -32,6 +32,8 @@ interface Room {
   owner: string;
   host: string;
   ruleset: RuleSet;
+  /** 战争迷雾（仅校园战争规则） */
+  fog: boolean;
   ai: AiLevel[];
   dropAi: AiLevel;
   status: 'lobby' | 'playing';
@@ -174,7 +176,7 @@ export class Hub {
         const mode: NetMode = m.mode === 'host' ? 'host' : 'server';
         const ruleset: RuleSet = m.ruleset === 'classic' ? 'classic' : 'remake';
         const r: Room = {
-          code: this.newCode(), mode, owner: me.id, host: me.id, ruleset,
+          code: this.newCode(), mode, owner: me.id, host: me.id, ruleset, fog: true,
           ai: defaultAi(ruleset), dropAi: ruleset === 'classic' ? 'classic' : 'normal',
           status: 'lobby', epoch: 0, members: [me.id], seats: new Map([[me.id, 0]]),
           start: null, auth: null, links: new Map(), hostAwaySince: 0, idleSince: this.sched.now(), dirty: true, lastSent: 0,
@@ -224,6 +226,7 @@ export class Hub {
           room.ai = defaultAi(m.ruleset);
           room.dropAi = m.ruleset === 'classic' ? 'classic' : 'normal';
         }
+        if (typeof m.fog === 'boolean') room.fog = m.fog;
         if (Array.isArray(m.ai) && m.ai.length === 4 && m.ai.every((a) => okAi(room.ruleset, a))) room.ai = m.ai.slice();
         if (okAi(room.ruleset, m.dropAi)) room.dropAi = m.dropAi!;
         if (typeof m.host === 'string' && room.members.includes(m.host)) room.host = m.host;
@@ -271,11 +274,11 @@ export class Hub {
     room.hostAwaySince = 0;
     const info: StartInfo = {
       epoch: room.epoch, mode: room.mode, host: room.host, seed: (Math.random() * 2 ** 32) >>> 0,
-      ruleset: room.ruleset, ai, dropAi: room.dropAi, seats,
+      ruleset: room.ruleset, fog: room.ruleset === 'remake' && room.fog, ai, dropAi: room.dropAi, seats,
     };
     room.start = info;
     if (room.mode === 'server') {
-      const game = createGame({ seed: info.seed, userCol: 4, rules: { ruleset: info.ruleset, ai: info.ai.slice() } });
+      const game = createGame({ seed: info.seed, userCol: 4, rules: { ruleset: info.ruleset, ai: info.ai.slice(), fog: !!info.fog } });
       room.auth = new Authority({
         game, sched: this.sched, dropAi: info.dropAi,
         humanSeats: seats.map((s) => !!s),
@@ -395,7 +398,7 @@ export class Hub {
       return { id, name: m.name, seat: room.seats.get(id) ?? -1, online: !!m.sock, srv: m.srv, peers: m.peers };
     });
     return {
-      code: room.code, mode: room.mode, owner: room.owner, host: room.host, ruleset: room.ruleset,
+      code: room.code, mode: room.mode, owner: room.owner, host: room.host, ruleset: room.ruleset, fog: room.fog,
       ai: room.ai.slice(), dropAi: room.dropAi, status: room.status, epoch: room.epoch, members,
     };
   }

@@ -1,8 +1,7 @@
 // 校园景物（docs/04 §5）：操场外是草地，种着树和灌木，开着小花；四所校舍各有一小片院子。
-// 景物按 160×100 的世界格子用哈希摆放，只画视野内的格子；位置固定，与对局无关，也不进存档。
+// 景物按 160×100 的世界格子用哈希摆放；位置固定，与对局无关，也不进存档。整片背景烘焙成一张像素图（backdrop.ts）。
 // 树和灌木都不会挡住操场：树冠顶端也必须在操场之外。
 import { BSIZE } from '../core/constants.ts';
-import type { Game } from '../core/types.ts';
 
 const BW = BSIZE * 48;
 const BH = BSIZE * 48;
@@ -26,7 +25,7 @@ function nearCorner(x: number, y: number, r: number): boolean {
   return CORNERS.some(([cx, cy]) => Math.abs(x - cx) / 2 + Math.abs(y - cy) < r);
 }
 
-interface Prop {
+export interface Prop {
   x: number;
   y: number;
   kind: 'tree' | 'pine' | 'bush';
@@ -34,14 +33,21 @@ interface Prop {
   v: number;
 }
 
-export function drawScenery(ctx: CanvasRenderingContext2D, _g: Game, x0: number, y0: number, x1: number, y1: number, now: number): void {
+export interface SceneryLayout {
+  props: Prop[];
+  /** 小草：[x, y, 深色?] */
+  tufts: [number, number, boolean][];
+  flowers: [number, number, string][];
+}
+
+/** 世界矩形 (x0, y0)–(x1, y1) 内的景物摆放（只看坐标哈希，与对局无关） */
+export function sceneryLayout(x0: number, y0: number, x1: number, y1: number): SceneryLayout {
   const cx0 = Math.floor(x0 / CELL_W) - 1;
   const cx1 = Math.floor(x1 / CELL_W) + 1;
   const cy0 = Math.floor(y0 / CELL_H) - 1;
   const cy1 = Math.floor(y1 / CELL_H) + 1;
   const props: Prop[] = [];
-  const tuftsDark = new Path2D();
-  const tuftsLight = new Path2D();
+  const tufts: [number, number, boolean][] = [];
   const flowers: [number, number, string][] = [];
   const petals = ['#fff6e0', '#ffe066', '#ff9ec4', '#c9b8ff'];
   for (let cy = cy0; cy <= cy1; cy++) {
@@ -51,13 +57,7 @@ export function drawScenery(ctx: CanvasRenderingContext2D, _g: Game, x0: number,
         const x = (cx + hash(cx, cy, i)) * CELL_W;
         const y = (cy + hash(cx, cy, i + 10)) * CELL_H;
         if (boardDist(x, y) < 8) continue;
-        const p = i % 2 ? tuftsDark : tuftsLight;
-        p.moveTo(x - 3, y);
-        p.lineTo(x - 1.5, y - 5);
-        p.moveTo(x, y);
-        p.lineTo(x + 0.5, y - 6.5);
-        p.moveTo(x + 3, y);
-        p.lineTo(x + 2, y - 4.5);
+        tufts.push([x, y, i % 2 === 1]);
       }
       // 小花
       if (hash(cx, cy, 20) < 0.55) {
@@ -84,24 +84,15 @@ export function drawScenery(ctx: CanvasRenderingContext2D, _g: Game, x0: number,
       props.push({ x, y, kind, s, v: hash(cx, cy, 55) });
     }
   }
-  ctx.lineCap = 'round';
-  ctx.lineWidth = 1.1;
-  ctx.strokeStyle = 'rgba(48,104,40,0.55)';
-  ctx.stroke(tuftsDark);
-  ctx.strokeStyle = 'rgba(150,205,110,0.55)';
-  ctx.stroke(tuftsLight);
-  for (const [x, y, c] of flowers) {
-    ctx.fillStyle = c;
-    ctx.beginPath();
-    ctx.arc(x, y, 1.6, 0, Math.PI * 2);
-    ctx.fill();
-  }
   props.sort((a, b) => a.y - b.y);
-  for (const p of props) {
-    if (p.kind === 'bush') bush(ctx, p.x, p.y, p.s, p.v);
-    else if (p.kind === 'pine') pine(ctx, p.x, p.y, p.s);
-    else tree(ctx, p.x, p.y, p.s, p.v, now);
-  }
+  return { props, tufts, flowers };
+}
+
+/** 以 (0, 0) 为树根画一棵景物（烘焙成像素精灵用） */
+export function drawProp(ctx: CanvasRenderingContext2D, kind: Prop['kind'], s: number, v: number): void {
+  if (kind === 'bush') bush(ctx, 0, 0, s, v);
+  else if (kind === 'pine') pine(ctx, 0, 0, s);
+  else tree(ctx, 0, 0, s, v, 0);
 }
 
 const LEAF = ['#3f8a3a', '#4c9a40', '#5aa84a'];

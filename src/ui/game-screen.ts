@@ -1,14 +1,19 @@
 // 对局画面：固定 18 tick/s 推进模拟，按显示器刷新率插值绘制；处理操作、HUD、菜单
 import { play } from '../audio/sfx.ts';
 import {
-  AREA, CAPTURE_VALUE, FPS, KILL_MHP, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, STAR_KILLS, STAR_MAX, TOP_RATIO,
+  AREA, BSIZE, CAPTURE_VALUE, FPS, KILL_MHP, PAINT_ENEMY_MUL, PAINT_NEED, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, STAR_KILLS, STAR_MAX, TOP_RATIO, UP_HP,
+  UP_REIN, UP_SPEED_STEP, UPGRADE_MAX,
 } from '../core/constants.ts';
+import { expCost, maxed } from '../core/growth.ts';
+import { isLeader } from '../core/squad.ts';
+import { supplied } from '../core/territory.ts';
 import { step, spadeCount } from '../core/sim.ts';
 import type { Command, Game, GameEvent } from '../core/types.ts';
 import { factionName, formatTime, t, type TextKey } from '../i18n/index.ts';
 import {
   Camera, hitSchool, minimapToWorld, newFx, newInterp, render, tileCenter, unitPos, type Fx, type MinimapRect, type ViewState,
 } from '../render/renderer.ts';
+import { FOG, FogView } from '../render/fogview.ts';
 import { FACTION } from '../render/palette.ts';
 import { writeSlot } from '../save/storage.ts';
 import type { NetClient } from '../net/client.ts';
@@ -76,6 +81,8 @@ export class GameScreen {
     power: HTMLElement;
     alerts: HTMLElement;
     tooltip: HTMLElement;
+    growth: HTMLElement;
+    bell: HTMLButtonElement;
   };
   private lastGroupKey = { n: -1, t: 0 };
   private lastClick = { pn: -1, t: 0 };
@@ -92,6 +99,8 @@ export class GameScreen {
   /** 编队：单机随存档保存在 g.groups；联机只存在本机 */
   private groups: number[][];
   private lastThreatTick = -1;
+  /** 本机玩家眼中的迷雾 */
+  private fog: FogView;
 
   constructor(game: Game, hooks: GameScreenHooks, net: NetGame | null = null) {
     this.game = game;
@@ -100,6 +109,8 @@ export class GameScreen {
     this.me = net ? (net.client.seat >= 0 ? net.client.seat : 4) : game.user_col;
     this.groups = net ? Array.from({ length: 10 }, () => []) : game.groups;
     this.view.me = this.me;
+    this.fog = new FogView(this.me);
+    this.view.fog = this.fog;
     this.canvas = h('canvas', { class: 'game-canvas' });
     this.ctx = this.canvas.getContext('2d')!;
     const chips = [0, 1, 2, 3].map(() => h('div', { class: 'chip' }));
@@ -113,11 +124,13 @@ export class GameScreen {
     const power = h('div', { class: 'power', title: t('power.tip') });
     const alerts = h('div', { class: 'alerts' });
     const tooltip = h('div', { class: 'tooltip hidden' });
+    const growth = h('div', { class: 'growth hidden' });
+    const bell = h('button', { class: 'bell-line hidden', onClick: () => this.focusBell() });
     const top = h(
       'div',
       { class: 'hud-top' },
       h('div', { class: 'hud-left' }, h('div', { class: 'chips' }, ...chips), power),
-      h('div', { class: 'hud-right' }, netLine, clock, speed, h('button', { class: 'btn small ghost', title: t(net ? 'hud.menu' : 'hud.pause'), onClick: () => this.openPause() }, net ? '☰' : '❚❚')),
+      h('div', { class: 'hud-right' }, bell, netLine, clock, speed, h('button', { class: 'btn small ghost', title: t(net ? 'hud.menu' : 'hud.pause'), onClick: () => this.openPause() }, net ? '☰' : '❚❚')),
     );
     let tips: HTMLElement | null = null;
     if (!settings.tipsSeen && this.me < 4) {
@@ -136,8 +149,8 @@ export class GameScreen {
         }, t('tips.ok')),
       );
     }
-    this.root = h('div', { class: 'game-screen' }, this.canvas, h('div', { class: 'hud' }, top, alerts, selbar, banner, tips), tooltip);
-    this.hud = { chips, clock, speed, netLine, selbar, selText, selHint, banner, tips, power, alerts, tooltip };
+    this.root = h('div', { class: 'game-screen' }, this.canvas, h('div', { class: 'hud' }, top, alerts, growth, selbar, banner, tips), tooltip);
+    this.hud = { chips, clock, speed, netLine, selbar, selText, selHint, banner, tips, power, alerts, tooltip, growth, bell };
     this.updateSpeedLabel();
     this.initCamera();
     this.snapInterp();
@@ -219,6 +232,7 @@ export class GameScreen {
       this.scrollCamera(dt);
     }
     if (!this.net) this.ip.alpha = Math.min(1, this.acc / TICK_MS);
+    this.fog.update(this.game);
     this.updateHover();
     this.updateTooltip();
     const out = render(this.ctx, this.game, this.cam, this.ip, this.view, this.fx, now, this.dpr);
@@ -367,6 +381,35 @@ export class GameScreen {
         if (this.cam.inside(p.px, p.py)) play(star ? 'star' : 'levelup');
         break;
       }
+      case 'flank':
+        this.fx.texts.push({ x: e.px, y: e.py, t0: now, text: t('msg.flank'), color: '#ffb04a' });
+        break;
+      case 'leader': {
+        const p = g.people[e.pn];
+        this.fx.texts.push({ x: p.px, y: p.py - 14, t0: now, text: t('msg.leader'), color: '#ffd84a' });
+        if (p.col === this.me) this.showBanner(t('msg.leader.you'), false, true);
+        break;
+      }
+      case 'paint':
+        if (this.fog.point(e.bx * 4 + 1.5, e.by * 4 + 1.5)) this.fx.painted.push({ t: e.by * BSIZE + e.bx, col: e.col, t0: now });
+        break;
+      case 'levelready':
+        if (e.col === this.me) {
+          play('star');
+          this.showBanner(t('msg.levelready'), false, true);
+        }
+        break;
+      case 'upgrade':
+        if (e.col === this.me) play('levelup');
+        break;
+      case 'bell':
+        play('bell');
+        this.fx.pings.push({ bx: e.bx, by: e.by, t0: now, color: '#ffd84a' });
+        this.showBanner(t('msg.bell'), false);
+        break;
+      case 'bellend':
+        this.showBanner(e.col >= 0 ? t('msg.bellend', { name: factionName(e.col) }) : t('msg.bellend.none'), false, true);
+        break;
       case 'annihilated': {
         let text = t('msg.annihilated', { name: factionName(e.col) });
         if (e.result === 'win') text = t('msg.win');
@@ -477,9 +520,10 @@ export class GameScreen {
       if (p.stat <= PS.DEAD) continue;
       if (who === 'own' && p.col !== this.me) continue;
       if (who === 'enemy' && p.col === this.me) continue;
+      if (!this.fog.unit(g, i)) continue;
       const [px, py] = unitPos(g, this.ip, i);
-      if (wx < px - 12 || wx >= px + 12 || wy < py - 34 || wy >= py + 10) continue;
-      const d = Math.hypot(wx - px, (wy - (py - 13)) * 0.8) - py * 1e-4;
+      if (wx < px - 13 || wx >= px + 13 || wy < py - 44 || wy >= py + 10) continue;
+      const d = Math.hypot(wx - px, (wy - (py - 18)) * 0.8) - py * 1e-4;
       if (d < best) {
         best = d;
         pn = i;
@@ -849,7 +893,11 @@ export class GameScreen {
     const net = this.net;
     const ns = net ? net.status() : null;
     const seatStates = net ? net.client.seats.join(',') : '';
-    const key = parts.join(',') + `|${this.view.selected.size}|${this.view.baseSelected}|${this.view.amove}|${settings.controls}|${Math.floor(g.tick / FPS)}|${settings.lang}|${ns?.text}|${seatStates}`;
+    const me = this.me;
+    const pl = me < 4 ? g.player[me] : null;
+    const growthKey = pl && g.rules.ruleset === 'remake' ? `${Math.floor((pl.exp / expCost(pl)) * 40)}|${pl.picks}|${pl.up.join('')}|${pl.exist}` : '';
+    const bellKey = g.rules.ruleset === 'remake' ? `${g.bell.bx},${g.bell.until > g.tick},${Math.ceil(((g.bell.until > g.tick ? g.bell.until : g.bell.next) - g.tick) / FPS)}` : '';
+    const key = parts.join(',') + `|${growthKey}|${bellKey}|${this.view.selected.size}|${this.view.baseSelected}|${this.view.amove}|${settings.controls}|${Math.floor(g.tick / FPS)}|${settings.lang}|${ns?.text}|${seatStates}`;
     if (key === this.hudCache) return;
     if (ns) {
       this.hud.netLine.textContent = ns.text;
@@ -889,6 +937,82 @@ export class GameScreen {
           : t(this.game.rules.ruleset === 'remake' ? 'hud.hint.remake' : 'hud.hint.modern');
     this.hud.selbar.classList.toggle('amove', this.view.amove);
     this.updatePower();
+    this.updateGrowth();
+    this.updateBell();
+  }
+
+  /** 基地经验条与升级选项（docs/06 §2）：攒满一次可挑一项，只影响之后新出的学生 */
+  private updateGrowth(): void {
+    const g = this.game;
+    const el = this.hud.growth;
+    const pl = this.me < 4 ? g.player[this.me] : null;
+    if (!pl || !pl.exist || g.rules.ruleset !== 'remake') {
+      el.classList.add('hidden');
+      return;
+    }
+    el.classList.remove('hidden');
+    const full = maxed(pl);
+    const k = full ? 1 : Math.min(1, pl.exp / expCost(pl));
+    const lv = pl.up.reduce((x, y) => x + y, 0);
+    const head = h(
+      'div',
+      { class: 'growth-head', title: t('growth.tip') },
+      h('span', { class: 'growth-title' }, t('growth.title', { lv })),
+      pl.picks > 0 ? h('span', { class: 'growth-ready' }, t('growth.ready', { n: pl.picks })) : null,
+    );
+    const bar = h('div', { class: 'growth-bar' }, h('div', { class: 'fill', style: `width:${(k * 100).toFixed(1)}%` }));
+    const kinds: { kind: number; key: 'up.hp' | 'up.punch' | 'up.speed' | 'up.rein'; gain: string }[] = [
+      { kind: 0, key: 'up.hp', gain: `+${Math.round(UP_HP * 100)}%` },
+      { kind: 1, key: 'up.punch', gain: '+1' },
+      { kind: 2, key: 'up.speed', gain: `+${Math.round((UP_SPEED_STEP / 6) * 100)}%` },
+      { kind: 3, key: 'up.rein', gain: `+${Math.round(UP_REIN * 100)}%` },
+    ];
+    const buttons = kinds.map(({ kind, key, gain }) => {
+      const lvk = pl.up[kind];
+      const can = pl.picks > 0 && lvk < UPGRADE_MAX;
+      return h(
+        'button',
+        {
+          class: `up-btn${can ? ' can' : ''}`,
+          disabled: !can,
+          title: t(`${key}.tip` as TextKey),
+          onClick: () => {
+            if (!can) return;
+            this.send({ type: 'upgrade', kind });
+          },
+        },
+        h('span', { class: 'up-name' }, t(key)),
+        h('span', { class: 'up-lv' }, `${'■'.repeat(lvk)}${'□'.repeat(UPGRADE_MAX - lvk)}`),
+        can ? h('span', { class: 'up-gain' }, gain) : null,
+      );
+    });
+    el.classList.toggle('ready', pl.picks > 0);
+    el.replaceChildren(head, bar, h('div', { class: 'up-row' }, ...buttons));
+  }
+
+  /** 下课铃：倒计时，开张时显示剩余秒数，点一下镜头移过去 */
+  private updateBell(): void {
+    const g = this.game;
+    const el = this.hud.bell;
+    if (g.rules.ruleset !== 'remake' || g.result !== 'playing') {
+      el.classList.add('hidden');
+      return;
+    }
+    const open = g.bell.bx >= 0 && g.tick < g.bell.until;
+    const secs = Math.max(0, Math.ceil(((open ? g.bell.until : g.bell.next) - g.tick) / FPS));
+    el.classList.remove('hidden');
+    el.classList.toggle('open', open);
+    el.textContent = open ? t('bell.open', { s: secs }) : t('bell.next', { t: formatTime(secs * FPS) });
+    el.title = t('bell.tip');
+  }
+
+  private focusBell(): void {
+    const b = this.game.bell;
+    if (b.bx < 0 || this.game.tick >= b.until) return;
+    const [x, y] = tileCenter(b.bx, b.by);
+    this.cam.x = x;
+    this.cam.y = y;
+    this.cam.clamp();
   }
 
   /** 势力比例条：与"众矢之的"的判定口径相同（人数 + 营地，兽人减半），标出 40% 线 */
@@ -921,10 +1045,18 @@ export class GameScreen {
       if (pn >= 0) {
         const p = g.people[pn];
         lines = [t('hover.unit', { name: factionName(p.col, true), hp: Math.ceil(p.hp), mhp: p.mhp, kills: p.lev })];
+        if (g.rules.ruleset === 'remake' && isLeader(p)) {
+          lines.push(t('hover.leader', { n: g.people.filter((q) => q.squad === pn && q.stat > PS.DEAD).length }));
+        } else if (p.squad >= 0) lines.push(t('hover.squad'));
       } else {
         const { bx, by } = this.tileAt(wx, wy);
-        const n = bx >= 0 && by >= 0 && bx < 16 && by < 16 ? g.bmap_n[by * 16 + bx] : -1;
-        if (n >= 0) lines = this.areaLines(n);
+        if (bx >= 0 && by >= 0 && bx < BSIZE && by < BSIZE) {
+          const tIdx = by * BSIZE + bx;
+          const n = g.bmap_n[tIdx];
+          if (this.fog.enabled && this.fog.tile(tIdx) !== FOG.SEEN && !(n >= 0 && g.area[n].areatype === AREA.BASE)) lines = [t('hover.fog')];
+          else if (n >= 0) lines = this.areaLines(n);
+          else if (g.rules.ruleset === 'remake') lines = this.landLines(tIdx);
+        }
       }
     }
     const key = lines.join('\n');
@@ -955,8 +1087,23 @@ export class GameScreen {
     }
     lines.push(t(a.areatype === AREA.SPADE ? 'hover.spade' : 'hover.heart'));
     lines.push(a.col >= 0 ? t('hover.owner', { name: factionName(a.col, true) }) : t('hover.neutral'));
+    if (g.rules.ruleset === 'remake' && a.col >= 0 && !supplied(g, a.by * BSIZE + a.bx, a.col)) lines.push(t('hover.cut'));
     for (let c = 0; c < 4; c++) {
       if (c !== a.col && a.val[c] > 0) lines.push(t('hover.progress', { name: factionName(c, true), pct: pct(a.val[c], CAPTURE_VALUE) }));
+    }
+    return lines;
+  }
+
+  /** 空白大格：归属、涂色进度、是否连着补给线 */
+  private landLines(tIdx: number): string[] {
+    const g = this.game;
+    const own = g.terr[tIdx];
+    const lines = [own >= 0 ? t('hover.land', { name: factionName(own, true) }) : t('hover.land.none')];
+    if (own >= 0 && !supplied(g, tIdx, own)) lines.push(t('hover.cut'));
+    const pc = g.paint_col[tIdx];
+    if (pc >= 0 && g.paint_val[tIdx] > 0) {
+      const need = own < 0 ? PAINT_NEED : PAINT_NEED * PAINT_ENEMY_MUL;
+      lines.push(t('hover.paint', { name: factionName(pc, true), pct: Math.min(99, Math.floor((100 * g.paint_val[tIdx]) / need)) }));
     }
     return lines;
   }

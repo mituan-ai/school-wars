@@ -5,6 +5,8 @@ import {
 import { random } from './rng.ts';
 import { baseFallen } from './query.ts';
 import { start_walk } from './unit.ts';
+import { UP, upgradedAppear, upgradedHp } from './growth.ts';
+import { suppliedSpades } from './territory.ts';
 import type { Game } from './types.ts';
 
 // 862/f2:1
@@ -17,8 +19,14 @@ export function appear_people(g: Game, pn: number, cx: number, cy: number, col: 
   p.cnt = 10 + random(g.rng) * 20;
   p.dir = Math.floor(random(g.rng) * 4);
   const remake = g.rules.ruleset === 'remake';
-  p.hp = p.mhp = (remake ? REMAKE_HP : SPEC_HP)[col];
-  p.punch = (remake ? REMAKE_PUNCH : SPEC_PUNCH)[col];
+  const pl = g.player[col];
+  // "校园战争"规则：按本部升级定下新兵的生命、攻击、移速
+  p.hp = p.mhp = remake ? upgradedHp(REMAKE_HP[col], pl) : SPEC_HP[col];
+  p.punch = remake ? REMAKE_PUNCH[col] + pl.up[UP.PUNCH] : SPEC_PUNCH[col];
+  p.spd = remake ? pl.up[UP.SPEED] : 0;
+  p.acc = 0;
+  p.squad = -1;
+  p.squad_uid = -1;
   p.lev = 0;
   p.col = col;
   p.uid = g.next_uid++;
@@ -95,17 +103,16 @@ export function check_add_people(g: Game): void {
   }
 }
 
-// 本部沦陷时不增援；人满时进度停在满格，一有空位立即补上
+// 本部沦陷时不增援；人满时进度停在满格，一有空位立即补上。只有连上补给的营地加快增援
 function check_add_people_remake(g: Game): void {
-  const spades = [0, 0, 0, 0];
-  for (const a of g.area) if (a.areatype === AREA.SPADE && a.col >= 0) spades[a.col]++;
   for (let i = 0; i < 4; i++) {
     const pl = g.player[i];
     if (!pl.exist || baseFallen(g, i)) continue;
-    pl.appear_cnt += 2 + spades[i];
-    if (pl.appear_cnt > REMAKE_APPEAR[i]) {
-      if (add_people(g, i)) pl.appear_cnt -= REMAKE_APPEAR[i];
-      else pl.appear_cnt = REMAKE_APPEAR[i] + 1;
+    const need = upgradedAppear(REMAKE_APPEAR[i], pl);
+    pl.appear_cnt += 2 + suppliedSpades(g, i);
+    if (pl.appear_cnt > need) {
+      if (add_people(g, i)) pl.appear_cnt -= need;
+      else pl.appear_cnt = need + 1;
     }
   }
 }
@@ -113,8 +120,10 @@ function check_add_people_remake(g: Game): void {
 /** 距离下一个新兵还需多少帧（界面提示用，不影响规则） */
 export function ticksToNextSpawn(g: Game, col: number): number {
   const pl = g.player[col];
+  const remake = g.rules.ruleset === 'remake';
   let spades = 0;
-  for (const a of g.area) if (a.areatype === AREA.SPADE && a.col === col) spades++;
-  const need = (g.rules.ruleset === 'remake' ? REMAKE_APPEAR : SPEC_APPEAR)[col] - pl.appear_cnt;
+  if (remake) spades = suppliedSpades(g, col);
+  else for (const a of g.area) if (a.areatype === AREA.SPADE && a.col === col) spades++;
+  const need = (remake ? upgradedAppear(REMAKE_APPEAR[col], pl) : SPEC_APPEAR[col]) - pl.appear_cnt;
   return Math.max(0, Math.floor(need / (2 + spades)) + 1);
 }

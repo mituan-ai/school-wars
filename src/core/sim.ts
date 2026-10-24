@@ -6,6 +6,10 @@ import { check_add_people } from './spawn.ts';
 import { isHuman } from './query.ts';
 import { random } from './rng.ts';
 import { decay_areas, people_action, start_walk, walk_to_cell } from './unit.ts';
+import { bellTick } from './bell.ts';
+import { growth, upgrade } from './growth.ts';
+import { squads } from './squad.ts';
+import { paint } from './territory.ts';
 import type { Command, Game, GameEvent } from './types.ts';
 
 /**
@@ -16,7 +20,13 @@ export function step(g: Game, commands: readonly Command[] = []): GameEvent[] {
   g.events = [];
   for (const c of commands) applyCommand(g, c);
   people_action(g);
-  if (g.rules.ruleset === 'remake') decay_areas(g);
+  if (g.rules.ruleset === 'remake') {
+    decay_areas(g);
+    paint(g);
+    bellTick(g);
+    squads(g);
+    growth(g);
+  }
   com_orders(g);
   for (let col = 0; col < 4; col++) {
     if (isHuman(g, col) || g.rules.ai[col] === 'classic' || !g.player[col].exist) continue;
@@ -31,6 +41,10 @@ export function step(g: Game, commands: readonly Command[] = []): GameEvent[] {
 export function applyCommand(g: Game, c: Command): void {
   if (c.type === 'control') {
     if (c.col >= 0 && c.col < 4) g.rules.ai[c.col] = c.ai;
+    return;
+  }
+  if (c.type === 'upgrade') {
+    if (g.rules.ruleset === 'remake') upgrade(g, c.col ?? g.user_col, c.kind);
     return;
   }
   if (c.type === 'rally') {
@@ -56,6 +70,11 @@ export function applyCommand(g: Game, c: Command): void {
   units.forEach((i, k) => {
     const p = g.people[i];
     if (remake) {
+      // 玩家单独给队员下令（不带班长）：离队
+      if (!c.keepSquad && p.squad >= 0 && !picked.has(p.squad)) {
+        p.squad = -1;
+        p.squad_uid = -1;
+      }
       p.ordered = !amove;
       p.leash = false;
       p.retaliate = -1;

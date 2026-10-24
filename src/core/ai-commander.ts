@@ -1,9 +1,12 @@
 // "校园战争"电脑指挥官（docs/03 §3）。
 // 只替换战略层：看到的信息与玩家相同，对世界的影响只通过与玩家相同的 order 指令。
 // 单位身上的 task / task_area 是指挥官自己的备忘，不参与单位层规则。
-import { AREA, FPS, PEOPLE_CAP, PS, REMAKE_APPEAR, REMAKE_HP, REMAKE_PUNCH } from './constants.ts';
+import { AREA, FPS, PEOPLE_CAP, PS, REMAKE_APPEAR, REMAKE_HP, REMAKE_PUNCH, SSIZE } from './constants.ts';
+import { fogOn, vision } from './fog.ts';
+import { newArea } from './mapgen.ts';
+import { suppliedSpades } from './territory.ts';
 import { baseFallen, topBlocks } from './query.ts';
-import type { AiLevel, Command, Game, OrderCommand } from './types.ts';
+import type { AiLevel, Area, Command, Game, OrderCommand } from './types.ts';
 
 export const TASK = { NONE: 0, RETREAT: 1, DEFEND: 2, EXPAND: 3, ATTACK: 4 } as const;
 
@@ -84,17 +87,21 @@ export function commander(g: Game, col: number): Command[] {
   const mine: number[] = [];
   const foes: number[] = [];
   const power = [0, 0, 0, 0];
+  // 迷雾：只知道看得见的敌人在哪（兵力对比仍按全局估算，相当于情报）
+  const seen = fogOn(g) ? vision(g, col) : null;
   for (let pn = 0; pn < g.people.length; pn++) {
     const p = g.people[pn];
     if (p.stat <= PS.DEAD) continue;
     power[p.col] += p.hp * p.punch;
     if (p.col === col) mine.push(pn);
-    else foes.push(pn);
+    else if (!seen || seen[p.cy * SSIZE + p.cx]) foes.push(pn);
   }
+  // 下课铃的小卖部当作一个临时地块，排在所有地块之后
+  const bell = g.bell;
+  const sites: Area[] = bell.bx >= 0 ? [...g.area, newArea(bell.bx, bell.by, AREA.NONE, -1)] : g.area;
   if (mine.length === 0) return [];
   // 兵力估算要算上增援：出兵快的学校（绿林）死了也补得快
-  const spades = [0, 0, 0, 0];
-  for (const a of g.area) if (a.areatype === AREA.SPADE && a.col >= 0) spades[a.col]++;
+  const spades = [0, 1, 2, 3].map((c) => (g.player[c].exist ? suppliedSpades(g, c) : 0));
   for (let c = 0; c < 4; c++) {
     if (!g.player[c].exist || baseFallen(g, c)) continue;
     const per = REMAKE_HP[c] * REMAKE_PUNCH[c];
@@ -128,12 +135,12 @@ export function commander(g: Game, col: number): Command[] {
   });
   const onArea = (pn: number, n: number): boolean => {
     const p = g.people[pn];
-    const a = g.area[n];
+    const a = sites[n];
     return Math.floor(p.cx / 4) === a.bx && Math.floor(p.cy / 4) === a.by;
   };
   const distTo = (pn: number, n: number): number => {
     const p = g.people[pn];
-    const a = g.area[n];
+    const a = sites[n];
     return Math.abs(p.cx - (a.bx * 4 + 1.5)) + Math.abs(p.cy - (a.by * 4 + 1.5));
   };
 
@@ -144,7 +151,7 @@ export function commander(g: Game, col: number): Command[] {
       if (p.hp < p.mhp * 0.9 && healSpots.includes(p.task_area)) {
         // 被自动迎战拉走过：打完再回去
         const idle = p.stat !== PS.WALK && p.stat !== PS.FIGHT;
-        if (idle && !onArea(pn, p.task_area) && budget > 0) issue(pn, g.area[p.task_area].bx, g.area[p.task_area].by, -1);
+        if (idle && !onArea(pn, p.task_area) && budget > 0) issue(pn, sites[p.task_area].bx, sites[p.task_area].by, -1);
         continue;
       }
       p.task = TASK.NONE;
@@ -164,7 +171,7 @@ export function commander(g: Game, col: number): Command[] {
     }
     p.task = TASK.RETREAT;
     p.task_area = best;
-    if (!onArea(pn, best)) issue(pn, g.area[best].bx, g.area[best].by, -1);
+    if (!onArea(pn, best)) issue(pn, sites[best].bx, sites[best].by, -1);
   }
 
   // 2. 目标：防守己方地块、扩张中立地块、夺取敌方地块、攻打敌方本部
@@ -221,19 +228,27 @@ export function commander(g: Game, col: number): Command[] {
     }
   });
 
+  if (bell.bx >= 0) {
+    const n = g.area.length;
+    const cx = bell.bx * 4 + 1.5;
+    const cy = bell.by * 4 + 1.5;
+    goals.push({ kind: TASK.EXPAND, area: n, cx, cy, want: Math.max(3, near(foes, cx, cy, THREAT_RANGE) + 1), have: 0, value: 75 * ps.expand, target: -1, distW: 1.2 });
+  }
+
   // 3. 哪些人空闲：在打架、在赶路、正在执行仍然有效的任务的人都不动
   const goalOf = (kind: number, area: number): Goal | undefined =>
     goals.find((q) => q.kind === kind && q.area === area);
   const free: number[] = [];
   for (const pn of mine) {
     const p = g.people[pn];
-    if (p.task === TASK.RETREAT || p.stat === PS.FIGHT) continue;
+    // 班长小队里的队员听班长的
+    if (p.task === TASK.RETREAT || p.stat === PS.FIGHT || p.squad >= 0) continue;
     if (p.task !== TASK.NONE) {
       const q = goalOf(p.task, p.task_area);
       if (q) {
         q.have++;
         if (p.stat !== PS.WALK && !onArea(pn, q.area) && budget > 0) {
-          issue(pn, g.area[q.area].bx, g.area[q.area].by, q.target);
+          issue(pn, sites[q.area].bx, sites[q.area].by, q.target);
         }
         continue;
       }
@@ -245,7 +260,7 @@ export function commander(g: Game, col: number): Command[] {
 
   // 攻本部要成队出发，凑不齐就先不去
   for (const q of goals) {
-    if (q.kind === TASK.ATTACK && g.area[q.area].areatype === AREA.BASE && !g.area[q.area].fallen) {
+    if (q.kind === TASK.ATTACK && sites[q.area].areatype === AREA.BASE && !sites[q.area].fallen) {
       const capped = mine.length >= PEOPLE_CAP - 1;
       if (q.have === 0 && !capped && free.length < Math.min(q.want, SIEGE_SQUAD)) q.want = 0;
     }
@@ -270,7 +285,7 @@ export function commander(g: Game, col: number): Command[] {
     const p = g.people[pn];
     p.task = q.kind;
     p.task_area = q.area;
-    if (!onArea(pn, q.area) || q.target >= 0) issue(pn, g.area[q.area].bx, g.area[q.area].by, q.target);
+    if (!onArea(pn, q.area) || q.target >= 0) issue(pn, sites[q.area].bx, sites[q.area].by, q.target);
   }
 
   return [...orders.values()];

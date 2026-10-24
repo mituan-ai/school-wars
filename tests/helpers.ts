@@ -40,6 +40,24 @@ export function addArea(g: Game, bx: number, by: number, areatype: 2 | 3, col = 
   return n;
 }
 
+/** 把 col 的本部到大格 (bx, by) 之间按"先横后竖"涂成 col 的地盘，接通补给线 */
+export function connect(g: Game, col: number, bx: number, by: number): void {
+  const pl = g.player[col];
+  let x = pl.basex;
+  let y = pl.basey;
+  const mark = () => {
+    if (g.bmap_n[y * BSIZE + x] < 0) g.terr[y * BSIZE + x] = col;
+  };
+  while (x !== bx) {
+    x += Math.sign(bx - x);
+    mark();
+  }
+  while (y !== by) {
+    y += Math.sign(by - y);
+    mark();
+  }
+}
+
 /** 在指定槽位、指定小格放一个单位（走原版 appear_people） */
 export function place(g: Game, pn: number, col: number, cx: number, cy: number): void {
   appear_people(g, pn, cx, cy, col);

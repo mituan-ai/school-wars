@@ -80,7 +80,7 @@ export const LEASH_RANGE = 12;
 export const KILL_HEAL = 0.3;
 export const KILL_MHP = 2;
 /** "校园战争"规则的阵营数值（按锦标赛结果调整，docs/03 §2.3；加入种族特性后重调，docs/04 §3） */
-export const REMAKE_APPEAR = [1500, 500, 1500, 1500];
+export const REMAKE_APPEAR = [1500, 750, 1500, 1500];
 export const REMAKE_HP = [17, 12, 28, 12];
 export const REMAKE_PUNCH = [4, 4, 3, 5];
 
@@ -97,9 +97,61 @@ export const STAR_MAX = 3;
  */
 export const TRAIT_CAPTURE = [1.3, 1, 1, 1];
 export const TRAIT_HEAL = [1, 1, 2, 1];
-export const TRAIT_HIT_TAKEN = [0.5, 0.5, 0.5, 0.42];
+export const TRAIT_HIT_TAKEN = [0.5, 0.5, 0.5, 0.38];
 
 /** 寻路：下一格暂时有人时最多原地等几次 */
 export const STUCK_TRIES = 5;
 /** 进攻移动：行进中发现多少小格内的敌人就去打 */
 export const AMOVE_RANGE = 6;
+
+// ---- v0.4 大更新（docs/06_v0.4玩法.md）：地盘、基地经验、班长小队、夹击、下课铃、战争迷雾 ----
+
+/** 涂地：一个人站在空白大格上，这么多帧后这一格归他的学校；敌方的格子要这么多倍 */
+export const PAINT_NEED = 18;
+export const PAINT_ENEMY_MUL = 3;
+/** 同一格里最多算几个人的涂地速度 */
+export const PAINT_CREW = 3;
+
+/** 基地经验：坐在己方（连通补给的）营地上每帧 +1；每秒按己方空白地盘数 / 2 加；每击倒一人加 */
+export const EXP_SIT = 1;
+export const EXP_KILL = 60;
+/** 第 n 次升级（n 从 0 起）所需经验 */
+export const EXP_COST_BASE = 2400;
+export const EXP_COST_STEP = 1200;
+/** 升级项：0 生命、1 攻击、2 移速、3 增援；每项最多几级 */
+export const UPGRADES = 4;
+export const UPGRADE_MAX = 3;
+/** 每级：生命 +15%（按种族基础值取整）、攻击 +1、移速 +1/6、增援间隔 −15% */
+export const UP_HP = 0.15;
+export const UP_SPEED_STEP = 1;
+export const UP_REIN = 0.15;
+
+/** 班长：几颗星以上；身边几格内的己方学生（含自己）出手更准 */
+export const LEADER_STARS = 3;
+export const LEADER_AURA = 4;
+/** 班长带的小队最多几人（不含班长）、从多远内招人、多远内找仗打 */
+export const SQUAD_SIZE = 3;
+export const SQUAD_RECRUIT = 8;
+export const SQUAD_SEEK = 16;
+/** 小队多久想一次（帧） */
+export const SQUAD_THINK = 18;
+
+/**
+ * 命中率倍率：被两个方向 / 三个以上方向同时围攻（夹击）、出手的人身边有己方班长。
+ * 按倍率乘在种族的被命中率上，精灵"难被打中"的相对优势不会被抵消
+ */
+export const FLANK_MUL = 0.3;
+export const FLANK3_MUL = 0.5;
+export const AURA_MUL = 0.2;
+
+/** 下课铃：开局多久第一次响，之后每隔多久响一次；小卖部开多久；每个占着的人每帧加多少经验（最多算几人） */
+export const BELL_FIRST = 90 * FPS;
+export const BELL_EVERY = 120 * FPS;
+export const BELL_OPEN = 40 * FPS;
+export const BELL_EXP = 2;
+export const BELL_CREW = 3;
+
+/** 迷雾：学生、本部、己方地盘的视野（小格，切比雪夫距离）；看过的地方多久后重新被迷雾盖住 */
+export const SIGHT_UNIT = 7;
+export const SIGHT_BASE = 9;
+export const REFOG = 20 * FPS;

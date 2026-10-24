@@ -149,7 +149,7 @@ function int(v: unknown, lo: number, hi: number): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
 }
 
-/** 玩家发来的指令：只接受移动 / 攻击 / 集结点，阵营由权威按座位填写 */
+/** 玩家发来的指令：只接受移动 / 攻击 / 集结点 / 本部升级，阵营由权威按座位填写 */
 export function sanitizeCommand(raw: unknown, col: number): Command | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const c = raw as Record<string, unknown>;
@@ -164,6 +164,10 @@ export function sanitizeCommand(raw: unknown, col: number): Command | null {
   if (c.type === 'rally') {
     if (!int(c.bx, -1, BSIZE - 1) || !int(c.by, -1, BSIZE - 1)) return null;
     return { type: 'rally', col, bx: c.bx, by: c.by };
+  }
+  if (c.type === 'upgrade') {
+    if (!int(c.kind, 0, 3)) return null;
+    return { type: 'upgrade', col, kind: c.kind };
   }
   return null;
 }

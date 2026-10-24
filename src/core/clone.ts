@@ -6,15 +6,19 @@ export function cloneGame(g: Game): Game {
   return {
     ...g,
     rng: { state: g.rng.state },
-    rules: { ruleset: g.rules.ruleset, ai: g.rules.ai.slice() },
+    rules: { ...g.rules, ai: g.rules.ai.slice() },
     bmap_pat: g.bmap_pat.slice(),
     bmap_n: g.bmap_n.slice(),
     area: g.area.map((a) => ({ ...a, val: a.val.slice(), touch: a.touch.slice() })),
     smap: g.smap.slice(),
-    player: g.player.map((p) => ({ ...p })),
+    player: g.player.map((p) => ({ ...p, up: p.up.slice() })),
     people: g.people.map((p) => ({ ...p, hx: p.hx.slice(), hy: p.hy.slice() })),
     groups: g.groups.map((x) => x.slice()),
     kills: g.kills.slice(),
+    terr: g.terr.slice(),
+    paint_col: g.paint_col.slice(),
+    paint_val: g.paint_val.slice(),
+    bell: { ...g.bell, gain: g.bell.gain.slice() },
     events: [],
   };
 }

@@ -4,7 +4,11 @@ import {
   ADDX, ADDY, AGGRO_RANGE, AMOVE_RANGE, AREA, BSIZE, CAPTURE_VALUE, DECAY_DELAY, HEAL_PER_TICK, KILL_HEAL, KILL_MHP,
   LEASH_RANGE, MOVEX, MOVEY, PMAX, PS, RECOVER_VALUE, SIEGE_VALUE, SSIZE, STUCK_TRIES, TOP_RATIO,
   TRAIT_CAPTURE, TRAIT_HEAL, TRAIT_HIT_TAKEN,
+  AURA_MUL, EXP_KILL, EXP_SIT, FLANK3_MUL, FLANK_MUL, LEADER_AURA, LEADER_STARS, UP_SPEED_STEP,
 } from './constants.ts';
+import { addExp } from './growth.ts';
+import { stars } from './query.ts';
+import { supplied } from './territory.ts';
 import { freeCellNear, nextDir, STEP_WAIT } from './path.ts';
 import { baseFallen, isHuman, topBlocks } from './query.ts';
 import { random } from './rng.ts';
@@ -28,6 +32,14 @@ export function people_action(g: Game): void {
         break;
       case PS.WALK:
         walking(g, pn);
+        // 移速升级：攒够一步的额外进度就多走一帧
+        if (p.spd > 0 && p.stat === PS.WALK && remake(g)) {
+          p.acc += p.spd * UP_SPEED_STEP;
+          if (p.acc >= 6) {
+            p.acc -= 6;
+            walking(g, pn);
+          }
+        }
         break;
       case PS.WAIT:
         p.cnt--;
@@ -236,7 +248,10 @@ function sit_on_area_remake(g: Game, p: Person, n: number): void {
       }
     }
   }
-  const heals = (a.areatype === AREA.BASE && !a.fallen) || a.areatype === AREA.HEART;
+  // 泉水要连上补给才回血；坐在连上补给的己方营地上给本部攒经验
+  const tile = a.by * BSIZE + a.bx;
+  const heals = (a.areatype === AREA.BASE && !a.fallen) || (a.areatype === AREA.HEART && supplied(g, tile, col));
+  if (a.areatype === AREA.SPADE && a.col === col && supplied(g, tile, col)) addExp(g, col, EXP_SIT);
   if (heals && a.col === col && p.hp < p.mhp) {
     p.hp += HEAL_PER_TICK * TRAIT_HEAL[col];
     if (p.hp > p.mhp) p.hp = p.mhp;
@@ -526,8 +541,14 @@ function fighting(g: Game, pn: number): void {
         p.fs = 3;
         p.cnt = 10;
         if (!target_exist(g, pn, t)) return;
-        // 命中率 50%；"校园战争"规则下精灵更难打中
-        const missBelow = remake(g) ? 10 * (1 - TRAIT_HIT_TAKEN[tp.col]) : 5;
+        // 命中率 50%；"校园战争"规则下精灵更难打中，夹击、班长在旁更容易打中
+        let missBelow = 5;
+        if (remake(g)) {
+          const flank = flankSides(g, t, tp.col);
+          const mul = 1 + (flank >= 3 ? FLANK3_MUL : flank >= 2 ? FLANK_MUL : 0) + (leaderNear(g, p) ? AURA_MUL : 0);
+          missBelow = 10 * (1 - Math.min(0.9, TRAIT_HIT_TAKEN[tp.col] * mul));
+          if (flank >= 2) g.events.push({ kind: 'flank', pn: t, px: tp.px, py: tp.py });
+        }
         if (random(g.rng) * 10 < missBelow) {
           g.events.push({ kind: 'miss', pn: t, px: tp.px, py: tp.py });
           return;
@@ -575,10 +596,34 @@ function hit(g: Game, pn: number, t: number): boolean {
     start_dead(g, t);
     start_levelup(g, pn);
     g.kills[p.col]++;
+    if (remake(g)) addExp(g, p.col, EXP_KILL);
     g.events.push({ kind: 'dead', pn: t, px: tp.px, py: tp.py });
     return true;
   }
   g.events.push({ kind: 'punch', pn: t, px: tp.px, py: tp.py });
+  return false;
+}
+
+/** 正在打 t 的敌人从几个不同方向围着它（相邻且在出拳） */
+function flankSides(g: Game, t: number, col: number): number {
+  const tp = g.people[t];
+  let sides = 0;
+  for (const o of g.people) {
+    if (o.stat !== PS.FIGHT || o.target_pn !== t || o.col === col) continue;
+    const dx = o.cx - tp.cx;
+    const dy = o.cy - tp.cy;
+    if (Math.abs(dx) + Math.abs(dy) !== 1) continue;
+    sides |= dx > 0 ? 1 : dx < 0 ? 2 : dy > 0 ? 4 : 8;
+  }
+  return (sides & 1) + ((sides >> 1) & 1) + ((sides >> 2) & 1) + ((sides >> 3) & 1);
+}
+
+/** 出手的人身边 LEADER_AURA 格内有己方班长（自己是班长也算） */
+function leaderNear(g: Game, p: Person): boolean {
+  for (const o of g.people) {
+    if (o.stat <= PS.DEAD || o.col !== p.col || stars(o.lev) < LEADER_STARS) continue;
+    if (Math.max(Math.abs(o.cx - p.cx), Math.abs(o.cy - p.cy)) <= LEADER_AURA) return true;
+  }
   return false;
 }
 
@@ -619,6 +664,7 @@ function start_levelup(g: Game, pn: number): void {
   if (remake(g)) {
     p.mhp += KILL_MHP;
     p.hp = Math.min(p.mhp, p.hp + KILL_HEAL * p.mhp);
+    if (stars(p.lev) === LEADER_STARS && stars(p.lev - 1) < LEADER_STARS) g.events.push({ kind: 'leader', pn });
   } else {
     p.mhp += 1;
   }

@@ -6,7 +6,7 @@ import { deserializeGame, serializeGame } from '../src/core/save.ts';
 import { applyCommand, step } from '../src/core/sim.ts';
 import { people_action, start_sit, start_walk, walk_to_cell } from '../src/core/unit.ts';
 import type { Game, Rules } from '../src/core/types.ts';
-import { addArea, blankGame, checkInvariants, place } from './helpers.ts';
+import { addArea, blankGame, checkInvariants, place, connect } from './helpers.ts';
 
 const R: Rules = { ruleset: 'remake', ai: ['classic', 'classic', 'classic', 'classic'] };
 
@@ -128,6 +128,7 @@ describe('种族特性', () => {
   it('矮人在泉水上回血快一倍', () => {
     const g = blankGame(1, 4, R);
     addArea(g, 7, 7, 3, 2);
+    connect(g, 2, 7, 7);
     place(g, 0, 2, 29, 29);
     g.people[0].hp = 5;
     start_sit(g, 0);
@@ -135,7 +136,7 @@ describe('种族特性', () => {
     expect(g.people[0].hp).toBeCloseTo(5 + 10 * HEAL_PER_TICK * 2);
   });
 
-  it('精灵更难被打中（约 42%），其他种族约 50%', () => {
+  it('精灵更难被打中（约 38%），其他种族约 50%', () => {
     const rate = (victim: number): number => {
       let hits = 0;
       let swings = 0;
@@ -161,8 +162,8 @@ describe('种族特性', () => {
       }
       return hits / swings;
     };
-    expect(rate(3)).toBeGreaterThan(0.37);
-    expect(rate(3)).toBeLessThan(0.46);
+    expect(rate(3)).toBeGreaterThan(0.33);
+    expect(rate(3)).toBeLessThan(0.43);
     expect(rate(2)).toBeGreaterThan(0.45);
   });
 });

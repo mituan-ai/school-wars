@@ -1,5 +1,5 @@
 // 地图生成与对局初始化 ← 862/f1、862/f2:127-155
-import { AREA, BSIZE, INITIAL_PEOPLE, PMAX, SSIZE, ADDX, ADDY, mappat } from './constants.ts';
+import { AREA, BELL_FIRST, BSIZE, INITIAL_PEOPLE, PMAX, SSIZE, ADDX, ADDY, mappat } from './constants.ts';
 import { createRng, random } from './rng.ts';
 import { add_people } from './spawn.ts';
 import { CLASSIC_RULES, type Area, type Game, type Person, type Player, type Rules } from './types.ts';
@@ -11,7 +11,7 @@ export function emptyPerson(): Person {
     hx: [], hy: [], hc: 0, bx: 0, by: 0, area_num: -1,
     donothing: NaN,
     uid: -1, ordered: false, leash: false, anchor_x: 0, anchor_y: 0, retaliate: -1, task: 0, task_area: -1,
-    stuck: 0, amove: false, goal_x: 0, goal_y: 0,
+    stuck: 0, amove: false, goal_x: 0, goal_y: 0, spd: 0, acc: 0, squad: -1, squad_uid: -1,
   };
 }
 
@@ -20,7 +20,7 @@ export function newArea(bx: number, by: number, areatype: number, col: number): 
 }
 
 export function newPlayer(exist: boolean, basex: number, basey: number): Player {
-  return { exist, basex, basey, people_cnt: 0, appear_cnt: 0, rally_bx: -1, rally_by: -1 };
+  return { exist, basex, basey, people_cnt: 0, appear_cnt: 0, rally_bx: -1, rally_by: -1, exp: 0, picks: 0, up: [0, 0, 0, 0] };
 }
 
 export interface NewGameOptions {
@@ -114,8 +114,13 @@ export function createGame(opts: NewGameOptions): Game {
     groups: Array.from({ length: 10 }, () => []),
     kills: [0, 0, 0, 0],
     result: 'playing',
+    terr: new Array<number>(BSIZE * BSIZE).fill(-1),
+    paint_col: new Array<number>(BSIZE * BSIZE).fill(-1),
+    paint_val: new Array<number>(BSIZE * BSIZE).fill(0),
+    bell: { bx: -1, by: -1, until: 0, next: BELL_FIRST, gain: [0, 0, 0, 0] },
     events: [],
   };
+  for (let c = 0; c < 4; c++) if (g.player[c].exist) g.terr[g.player[c].basey * BSIZE + g.player[c].basex] = c;
 
   for (let i = 0; i < 4; i++) {
     if (g.player[i].exist) {

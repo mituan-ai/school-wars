@@ -59,6 +59,13 @@ export interface Person {
   amove: boolean;
   goal_x: number;
   goal_y: number;
+  // ---- v0.4（docs/06）----
+  /** 移速等级（出生时按本部升级定下）与走路的额外进度 */
+  spd: number;
+  acc: number;
+  /** 所属小队的班长槽位与 uid（-1：不在小队里） */
+  squad: number;
+  squad_uid: number;
 }
 
 export interface Area {
@@ -85,6 +92,21 @@ export interface Player {
   /** 集结点大格（-1 表示未设置；仅"校园战争"规则） */
   rally_bx: number;
   rally_by: number;
+  // ---- v0.4（docs/06）----
+  /** 基地经验、已攒下还没选的升级次数、各升级项等级（生命、攻击、移速、增援） */
+  exp: number;
+  picks: number;
+  up: number[];
+}
+
+/** 下课铃：小卖部所在大格、开到哪一帧、下次什么时候响 */
+export interface Bell {
+  bx: number;
+  by: number;
+  until: number;
+  next: number;
+  /** 这一次各校从小卖部得到的经验 */
+  gain: number[];
 }
 
 /** 模拟向界面层发出的事件（不存档） */
@@ -97,7 +119,14 @@ export type GameEvent =
   | { kind: 'miss'; pn: number; px: number; py: number }
   | { kind: 'fallen'; area: number; col: number; by: number }
   | { kind: 'recovered'; area: number; col: number }
-  | { kind: 'annihilated'; col: number; result: 'none' | 'win' | 'lose'; persistent: boolean };
+  | { kind: 'annihilated'; col: number; result: 'none' | 'win' | 'lose'; persistent: boolean }
+  | { kind: 'flank'; pn: number; px: number; py: number }
+  | { kind: 'leader'; pn: number }
+  | { kind: 'levelready'; col: number }
+  | { kind: 'upgrade'; col: number; kind2: number }
+  | { kind: 'bell'; bx: number; by: number }
+  | { kind: 'bellend'; col: number }
+  | { kind: 'paint'; bx: number; by: number; col: number };
 
 export type RuleSet = 'classic' | 'remake';
 /** 'human'：由玩家控制（联机局里每个人类座位都标成它；单机只用 user_col） */
@@ -108,12 +137,14 @@ export interface Rules {
   ruleset: RuleSet;
   /** 每个阵营的电脑 AI（user_col 与标为 'human' 的阵营忽略） */
   ai: AiLevel[];
+  /** 战争迷雾（仅"校园战争"规则；省略为关） */
+  fog?: boolean;
 }
 
 export const CLASSIC_RULES: Rules = { ruleset: 'classic', ai: ['classic', 'classic', 'classic', 'classic'] };
 
 export function remakeRules(level: Exclude<AiLevel, 'classic' | 'human'> = 'normal'): Rules {
-  return { ruleset: 'remake', ai: [level, level, level, level] };
+  return { ruleset: 'remake', ai: [level, level, level, level], fog: true };
 }
 
 export interface Game {
@@ -140,6 +171,12 @@ export interface Game {
   kills: number[];
   /** 胜负结果（重制版新增，供结算界面使用） */
   result: 'playing' | 'win' | 'lose' | 'over';
+  // ---- v0.4（docs/06）----
+  /** 每个大格的地盘归属（-1 无主）与涂地进度（哪个学校在涂、涂了多少） */
+  terr: number[];
+  paint_col: number[];
+  paint_val: number[];
+  bell: Bell;
   events: GameEvent[];
 }
 
@@ -154,6 +191,8 @@ export interface OrderCommand {
   target: number;
   /** 进攻移动（仅"校园战争"规则，且只对走向地面的指令有效） */
   amove?: boolean;
+  /** 小队自己下的令：队员不因此离队（只在本机模拟内部使用，不经网络） */
+  keepSquad?: boolean;
 }
 
 /** 设置集结点（bx < 0 表示取消） */
@@ -172,4 +211,11 @@ export interface ControlCommand {
   ai: AiLevel;
 }
 
-export type Command = OrderCommand | RallyCommand | ControlCommand;
+/** 本部升级：花掉一次攒下的升级，选一项（0 生命、1 攻击、2 移速、3 增援） */
+export interface UpgradeCommand {
+  type: 'upgrade';
+  col?: number;
+  kind: number;
+}
+
+export type Command = OrderCommand | RallyCommand | ControlCommand | UpgradeCommand;

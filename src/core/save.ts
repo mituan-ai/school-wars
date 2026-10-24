@@ -1,7 +1,8 @@
 // 对局状态的序列化。模拟是确定性的，所以"状态 + 随机数状态"就是完整存档。
+import { BELL_FIRST, BSIZE } from './constants.ts';
 import { CLASSIC_RULES, type Game } from './types.ts';
 
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 interface SaveFile {
   v: number;
@@ -25,6 +26,7 @@ export function deserializeGame(text: string): Game {
   if (file.v > SAVE_VERSION) throw new Error(`存档版本 ${file.v} 比当前程序新`);
   if (file.v === 1) migrateV1(file.game as unknown as Record<string, unknown>);
   if (file.v <= 2) migrateV2(file.game as unknown as Game);
+  if (file.v <= 3) migrateV3(file.game as unknown as Game);
   return { ...file.game, events: [] };
 }
 
@@ -48,6 +50,19 @@ function migrateV1(game: Record<string, unknown>): void {
 /** v2 → v3：补上寻路等待计数和进攻移动的字段 */
 function migrateV2(g: Game): void {
   for (const p of g.people) Object.assign(p, { stuck: 0, amove: false, goal_x: 0, goal_y: 0 });
+}
+
+/** v3 → v4：补上地盘、基地经验、小队、下课铃的字段（旧存档的地盘只有各自本部） */
+function migrateV3(g: Game): void {
+  for (const p of g.people) Object.assign(p, { spd: 0, acc: 0, squad: -1, squad_uid: -1 });
+  for (const pl of g.player) Object.assign(pl, { exp: 0, picks: 0, up: [0, 0, 0, 0] });
+  g.terr = new Array<number>(BSIZE * BSIZE).fill(-1);
+  g.paint_col = new Array<number>(BSIZE * BSIZE).fill(-1);
+  g.paint_val = new Array<number>(BSIZE * BSIZE).fill(0);
+  g.player.forEach((pl, c) => {
+    if (pl.exist) g.terr[pl.basey * BSIZE + pl.basex] = c;
+  });
+  g.bell = { bx: -1, by: -1, until: 0, next: g.tick + BELL_FIRST, gain: [0, 0, 0, 0] };
 }
 
 /** 状态指纹，用于测试"读档后走向一致" */

@@ -7,7 +7,7 @@
 [简体中文](README.md) | English
 
 [![Play online](https://img.shields.io/badge/play_online-schoolwars.yhdmt.site-e8513f?style=flat-square)](https://schoolwars.yhdmt.site)
-[![Version](https://img.shields.io/badge/version-v0.3.0-3fb35e?style=flat-square)](https://github.com/mituan-ai/school-wars/releases)
+[![Version](https://img.shields.io/badge/version-v0.3.1-3fb35e?style=flat-square)](https://github.com/mituan-ai/school-wars/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white)
 ![Zero runtime dependencies](https://img.shields.io/badge/runtime_deps-0-8b5cf6?style=flat-square)

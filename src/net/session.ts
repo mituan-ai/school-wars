@@ -16,6 +16,8 @@ const PING_MS = 2000;
 const SILENT_MS = 5000;
 /** 发给 LA 的 ping 这么久没回：网络多半已经断了，不等 TCP 超时，直接重连 */
 const SERVER_SILENT_MS = 8000;
+/** 直连失败后隔多久重试（每次翻倍，最多 60 秒）；由 id 较小、负责发 offer 的一方发起 */
+const PEER_RETRY_MS = 15_000;
 
 /** 调试：?netdelay=110 给本页发出的所有联机消息加 110 ms 延迟（两页互相加就是往返 220 ms） */
 function debugDelay(): number {
@@ -71,11 +73,18 @@ export class Online {
   /** 自上次收到 pong 以来第一条 ping 的发出时间（0：没有在等的） */
   private waitingSince = 0;
   private closed = false;
+  /** 上一次房间状态里在线的其他成员 */
+  private onlineIds = new Set<string>();
+  /** 每个成员的直连已经重试了几次 */
+  private retries = new Map<string, number>();
 
   constructor() {
     this.connect();
     this.timers.push(window.setInterval(() => this.ping(), PING_MS));
-    this.timers.push(window.setInterval(() => this.reportStats(), STAT_MS));
+    this.timers.push(window.setInterval(() => {
+      this.reportStats();
+      this.retryPeers();
+    }, STAT_MS));
   }
 
   get me(): string {
@@ -215,6 +224,8 @@ export class Online {
       case 'welcome':
         this.id = m.id;
         storageSet('session', 'sw.net.id', m.id);
+        // 自己刚连回 LA：别人那边会把和我的直连重建，这边连不上的也跟着重建
+        this.onlineIds.clear();
         this.status = 'online';
         this.ping();
         break;
@@ -258,7 +269,9 @@ export class Online {
         this.game?.onHost(m.host, m.epoch);
         break;
       case 'signal': {
-        const p = this.peers.get(m.from);
+        let p = this.peers.get(m.from);
+        // 对方新建了连接（重新上线、重试）而这边的已经用过或已断开：换一个新的来应答
+        if (p && p.canDirect && isOffer(m.d) && !p.acceptsOffer()) p = this.addPeer(m.from);
         if (p) void p.onSignal(m.d);
         return;
       }
@@ -274,24 +287,55 @@ export class Online {
 
   /** 和房间里每个在线成员保持一条直连（或确认连不上） */
   private syncPeers(): void {
-    const want = new Set((this.room?.members ?? []).filter((m) => m.online && m.id !== this.id).map((m) => m.id));
+    const members = this.room?.members ?? [];
+    const want = new Set(members.filter((m) => m.online && m.id !== this.id).map((m) => m.id));
     for (const [id, p] of this.peers) {
-      if (!want.has(id)) {
-        p.close();
-        this.peers.delete(id);
-      }
+      // LA 说对方离线、直连却还通着：多半只是对方到 LA 的连接闪断，对局数据照样走直连，不拆
+      if (want.has(id) || (p.via === 'direct' && members.some((m) => m.id === id))) continue;
+      p.close();
+      this.peers.delete(id);
     }
     for (const id of want) {
-      if (this.peers.has(id)) continue;
-      const p = new Peer(id, this.id < id, (d) => this.send({ t: 'signal', to: id, d }), this.delay);
-      p.onState = () => {
-        this.game?.onPeerState(id);
-        this.onChange();
-      };
-      p.onGame = (d) => this.game?.onPeerGame(id, d);
-      this.peers.set(id, p);
+      const p = this.peers.get(id);
+      // 对方刚重新上线：之前没连上的直连重来一次（对方那边也是新建的）
+      if (p && (p.via !== 'relay' || this.onlineIds.has(id))) continue;
+      this.addPeer(id);
+    }
+    this.onlineIds = want;
+  }
+
+  /** 新建（或换掉）和某个成员的直连 */
+  private addPeer(id: string): Peer {
+    this.peers.get(id)?.close();
+    const p = new Peer(id, this.id < id, (d) => this.send({ t: 'signal', to: id, d }), this.delay);
+    p.onState = () => {
+      if (this.peers.get(id) !== p) return;
+      if (p.via === 'direct') this.retries.delete(id);
+      this.game?.onPeerState(id);
+      this.onChange();
+    };
+    p.onGame = (d) => {
+      if (this.peers.get(id) === p) this.game?.onPeerGame(id, d);
+    };
+    this.peers.set(id, p);
+    return p;
+  }
+
+  /** 直连失败的成员隔一段时间重试：网络抖动、对方掉线重连之后，不至于一直走中转 */
+  private retryPeers(): void {
+    const now = performance.now();
+    for (const [id, p] of this.peers) {
+      if (p.via !== 'relay' || !p.canDirect || this.id >= id || !this.onlineIds.has(id)) continue;
+      const n = this.retries.get(id) ?? 0;
+      if (now - p.failedAt < Math.min(60_000, PEER_RETRY_MS * 2 ** n)) continue;
+      this.retries.set(id, n + 1);
+      this.addPeer(id);
     }
   }
+}
+
+function isOffer(d: unknown): boolean {
+  return typeof d === 'object' && d !== null && (d as { sdp?: { type?: string } }).sdp?.type === 'offer';
 }
 
 /** 一局联机对局 */

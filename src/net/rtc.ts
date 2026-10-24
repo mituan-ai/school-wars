@@ -1,5 +1,5 @@
 // WebRTC 直连（docs/05 §4）：房间里的成员两两尝试直连，用于测速、玩家主机模式的对局数据和换房主。
-// 信令经 LA 转发；10 秒内连不上就算失败，这对成员之间改走 LA 中转。不部署 TURN。
+// 信令经 LA 转发；10 秒内连不上就算失败，这对成员之间改走 LA 中转，之后由会话层隔一段时间重试。不部署 TURN。
 import { BaseLink, Reassembler, toChunks } from './link.ts';
 
 /** 公共 STUN：任一可用即可。中国大陆通常连不上 Google，所以另配了 Cloudflare 和小米的 */
@@ -16,6 +16,10 @@ type Wire = { t: 'p'; i: number } | { t: 'q'; i: number } | { t: 'g'; d: unknown
 export class Peer {
   via: 'trying' | 'direct' | 'relay' = 'trying';
   rtt = 0;
+  /** 本页能尝试直连（不支持 WebRTC 或 ?relay=1 时只走中转） */
+  readonly canDirect: boolean;
+  /** 改走中转的时间 */
+  failedAt = 0;
   /** 直连状态变化 */
   onState: () => void = () => {};
   /** 对方经直连发来的对局消息 */
@@ -38,7 +42,8 @@ export class Peer {
     this.id = id;
     this.signal = signal;
     this.delay = delay;
-    if (typeof RTCPeerConnection === 'undefined' || forcedRelay()) {
+    this.canDirect = typeof RTCPeerConnection !== 'undefined' && !forcedRelay();
+    if (!this.canDirect) {
       this.via = 'relay';
       return;
     }
@@ -69,6 +74,11 @@ export class Peer {
         this.signal({ sdp: pc.localDescription?.toJSON() });
       }).catch(() => this.fail());
     }
+  }
+
+  /** 还能应答一个新的 offer（没收过对方的描述）；否则对方是新建的连接，这边也得换一个新的 */
+  acceptsOffer(): boolean {
+    return !!this.pc && !this.pc.remoteDescription;
   }
 
   /** 收到对方经 LA 转发的信令 */
@@ -120,6 +130,7 @@ export class Peer {
     if (this.via === 'relay') return;
     this.close();
     this.via = 'relay';
+    this.failedAt = performance.now();
     this.onState();
   }
 

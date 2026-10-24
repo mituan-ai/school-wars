@@ -20,6 +20,10 @@ interface Conn {
   tokens: number;
   refill: number;
   bye: boolean;
+  /** sync 之前就到了的指令（例如 sync 在路上丢了、随后重发），sync 后再处理 */
+  early: { s: number; w: number; c: unknown }[];
+  /** 上一次免限速收下 sync 里的指令的时间（防止靠连发 sync 绕过限速） */
+  freeAt: number;
 }
 
 export interface AuthorityOptions {
@@ -40,6 +44,8 @@ export interface AuthorityOptions {
 
 /** 每个座位最多记住多少个已定帧的指令序号（去重用） */
 const SEEN_KEEP = 4000;
+/** sync 里重发的待确认指令、sync 之前到的指令，最多各收这么多条 */
+const PEND_KEEP = 64;
 /** 指纹保留多久（帧） */
 const HASH_KEEP = 90 * 40;
 
@@ -100,7 +106,7 @@ export class Authority {
   }
 
   attach(link: Link, col: number): void {
-    const conn: Conn = { link, col, synced: false, f: -1, tokens: CMD_RATE, refill: this.sched.now(), bye: false };
+    const conn: Conn = { link, col, synced: false, f: -1, tokens: CMD_RATE, refill: this.sched.now(), bye: false, early: [], freeAt: -Infinity };
     this.conns.add(conn);
     link.onMessage = (m) => this.onMessage(conn, m);
     link.onClose = () => this.detach(conn);
@@ -170,6 +176,7 @@ export class Authority {
         break;
       case 'cmd':
         if (conn.synced) this.onCmd(conn, m);
+        else if (conn.early.length < PEND_KEEP) conn.early.push(m);
         break;
       case 'ping':
         if (typeof m.i === 'number') this.send(conn, { t: 'pong', i: m.i, a: this.time() });
@@ -203,23 +210,30 @@ export class Authority {
       this.waitFor?.delete(conn.col);
       if (this.humanSeats[conn.col] && this.game.rules.ai[conn.col] !== 'human') this.queueControl(conn.col, 'human');
     }
-    if (Array.isArray(m.pend)) for (const p of m.pend) this.onCmd(conn, p as PendingCmd);
+    // 重发的指令是早先已经算过限速的，不再占额度（否则积压超过一秒的额度就会被丢掉）
+    if (Array.isArray(m.pend)) {
+      const now = this.sched.now();
+      const free = now - conn.freeAt >= 1000;
+      if (free) conn.freeAt = now;
+      for (const p of m.pend.slice(-PEND_KEEP)) this.onCmd(conn, p as PendingCmd, free);
+    }
+    for (const p of conn.early.splice(0)) this.onCmd(conn, p);
     // 座位状态只在变化时广播，新接上的这一条要单独补发一份
     this.broadcastSeats();
     this.send(conn, { t: 'seats', s: this.seatStates() });
   }
 
-  private onCmd(conn: Conn, m: { s: number; w: number; c: unknown }): void {
-    if (conn.col < 0 || !this.humanSeats[conn.col] || typeof m.s !== 'number') return;
+  private onCmd(conn: Conn, m: { s: number; w: number; c: unknown }, resent = false): void {
+    if (conn.col < 0 || !this.humanSeats[conn.col] || typeof m?.s !== 'number') return;
     const now = this.sched.now();
     conn.tokens = Math.min(CMD_RATE, conn.tokens + ((now - conn.refill) / 1000) * CMD_RATE);
     conn.refill = now;
-    if (conn.tokens < 1) return;
+    if (!resent && conn.tokens < 1) return;
     const seen = this.seen[conn.col];
     if (seen.has(m.s)) return;
     const c = sanitizeCommand(m.c, conn.col);
     if (!c) return;
-    conn.tokens--;
+    if (!resent) conn.tokens--;
     remember(seen, m.s);
     const open = this.game.tick;
     const w = typeof m.w === 'number' && Number.isFinite(m.w) ? Math.floor(m.w) : open;

@@ -17,6 +17,8 @@ const TAIL_KEEP = 400;
 const PING_MS = 1000;
 /** 接上链路后这么久还没收到状态，就重发 sync */
 const RESYNC_MS = 3000;
+/** 指令过了执行帧还没确认、又过了 往返延迟 + 这么久：重发一次；再等这么久仍没确认就放弃 */
+const PEND_WAIT_MS = 800;
 /** 纠正偏移的衰减时间常数（ms） */
 const SMOOTH_MS = 90;
 
@@ -37,6 +39,8 @@ export interface NetStats {
   ahead: number;
   /** 迟到（被权威推后执行）的指令数 */
   late: number;
+  /** 一直没被确认、最终放弃的自己的指令数 */
+  dropped: number;
   /** 收到快照纠正的次数（不含开局和重连） */
   resyncs: number;
   /** 预测到了上限，在等网络 */
@@ -68,6 +72,11 @@ export class NetClient {
   private tail: Batch[] = [];
   private pending: PendingCmd[] = [];
   private issuedAt = new Map<number, number>();
+  /** 待确认指令最近一次发出的时间、单独重发过几次 */
+  private sentAt = new Map<number, { at: number; n: number }>();
+  /** 上一次因缺帧请权威补发：从哪一帧、什么时候 */
+  private gapFrom = -1;
+  private gapAt = -Infinity;
   private seq: number;
   private pendVer = 0;
   // 对时：权威时间 ≈ now - off
@@ -103,7 +112,7 @@ export class NetClient {
   private expectSnap = true;
   /** 同一条链路上没有状态时重发过几次 sync：每次都会换来一份快照，这些不算纠正 */
   private snapsDue = 0;
-  private st = { late: 0, resyncs: 0, confirmMs: 0, ahead: 0, stalled: false };
+  private st = { late: 0, resyncs: 0, confirmMs: 0, ahead: 0, stalled: false, dropped: 0 };
 
   constructor(o: ClientOptions) {
     this.seat = o.seat;
@@ -141,6 +150,8 @@ export class NetClient {
     this.attachedAt = this.lastHeard;
     this.pings.clear();
     this.expectSnap = true;
+    this.gapFrom = -1;
+    this.markSent(this.lastHeard);
     this.send({ t: 'sync', f: this.confirmed ? this.confirmed.tick : -1, tail: this.tail.slice(-120), pend: this.pending });
   }
 
@@ -165,6 +176,7 @@ export class NetClient {
     const s = this.seq++;
     this.pending.push({ s, w, c });
     this.issuedAt.set(s, now);
+    this.sentAt.set(s, { at: now, n: 0 });
     this.pendVer++;
     this.send({ t: 'cmd', s, w, c });
   }
@@ -184,6 +196,7 @@ export class NetClient {
       ahead: this.st.ahead,
       late: this.st.late,
       resyncs: this.st.resyncs,
+      dropped: this.st.dropped,
       stalled: this.st.stalled,
       held: this.held,
       confirmMs: this.st.confirmMs,
@@ -317,7 +330,7 @@ export class NetClient {
     }
     this.tail = [];
     const done = new Set(seen);
-    this.pending = this.pending.filter((p) => !done.has(p.s));
+    this.pending = this.pending.filter((p) => !done.has(p.s) || this.forget(p.s));
     this.pendVer++;
     this.pred = null;
     this.predKey = '';
@@ -329,8 +342,14 @@ export class NetClient {
     const g = this.confirmed;
     if (!g || b.k < g.tick) return;
     if (b.k > g.tick) {
-      // 链路是有序可靠的，正常不会缺帧；万一缺了，请权威从这里补
-      this.send({ t: 'sync', f: g.tick, tail: [], pend: [] });
+      // 链路是有序可靠的，正常不会缺帧；万一缺了（中转丢了消息），请权威从这里补，顺带重发待确认的指令。
+      // 补发到达之前后面的帧还会接着来，同一个缺口只请求一次
+      if (this.gapFrom !== g.tick || now - this.gapAt > this.rtt + PEND_WAIT_MS) {
+        this.gapFrom = g.tick;
+        this.gapAt = now;
+        this.markSent(now);
+        this.send({ t: 'sync', f: g.tick, tail: [], pend: this.pending });
+      }
       return;
     }
     this.expectSnap = false;
@@ -353,7 +372,7 @@ export class NetClient {
       this.pending.splice(i, 1);
       this.pendVer++;
       const t0 = this.issuedAt.get(p.s);
-      this.issuedAt.delete(p.s);
+      this.forget(p.s);
       if (t0 !== undefined) this.st.confirmMs = now - t0;
       if (b.k > p.w) {
         this.st.late++;
@@ -361,6 +380,7 @@ export class NetClient {
       }
     }
     this.lateBoost = Math.max(0, this.lateBoost - 0.2);
+    this.prunePending(now);
     this.tail.push(b);
     if (this.tail.length > TAIL_KEEP) this.tail.splice(0, this.tail.length - TAIL_KEEP);
     if (g.tick % HASH_EVERY === 0) this.send({ t: 'hash', k: g.tick, h: hashGame(g) });
@@ -388,6 +408,42 @@ export class NetClient {
     this.off = best.off;
   }
 
+  /** 待确认指令全部按"刚发出"计时（sync 里整批重发了） */
+  private markSent(now: number): void {
+    for (const p of this.pending) this.sentAt.set(p.s, { at: now, n: 0 });
+  }
+
+  private forget(s: number): false {
+    this.issuedAt.delete(s);
+    this.sentAt.delete(s);
+    return false;
+  }
+
+  /**
+   * 执行帧已经过去、迟迟没确认的指令：多半在路上丢了，或被权威拒收（限速等）。
+   * 先单独重发一次（权威按序号去重，不会执行两遍）；还不行就放弃，不让它永远留在预测里
+   */
+  private prunePending(now: number): void {
+    const F = this.confirmed!.tick;
+    const wait = this.rtt + 2 * this.jitter + PEND_WAIT_MS;
+    const before = this.pending.length;
+    this.pending = this.pending.filter((p) => {
+      if (p.w >= F) return true;
+      const t = this.sentAt.get(p.s);
+      if (!t) return this.forget(p.s);
+      if (now - t.at < wait) return true;
+      if (t.n > 0) return this.forget(p.s);
+      t.at = now;
+      t.n++;
+      this.send({ t: 'cmd', s: p.s, w: p.w, c: p.c });
+      return true;
+    });
+    if (this.pending.length !== before) {
+      this.st.dropped += before - this.pending.length;
+      this.pendVer++;
+    }
+  }
+
   private repredict(F: number, d: number, key: string): void {
     const old = this.pred;
     const oldD = this.predD;
@@ -404,6 +460,9 @@ export class NetClient {
       }
     }
     const P = cloneGame(this.confirmed!);
+    // 迟到的指令算在最早的未确认帧上。正常的迟到不超过抖动那么几帧；更晚的多半丢了，不再算进预测
+    // （否则每次重算都从头执行一遍，画面上的学生会在原地和刚起步之间来回跳），等确认或重发
+    const stale = Math.ceil((2 * this.jitter + this.lateBoost) / TICK_MS) + 1;
     for (let k = F; k < d; k++) {
       if (k === d - 1) {
         for (let i = 0; i < PMAX; i++) {
@@ -412,7 +471,7 @@ export class NetClient {
         }
       }
       const cmds: Command[] = [];
-      for (const p of this.pending) if (Math.max(p.w, F) === k) cmds.push(p.c);
+      for (const p of this.pending) if (Math.max(p.w, F) === k && F - p.w <= stale) cmds.push(p.c);
       const events = step(P, cmds);
       if (k > this.fxTick) {
         for (const e of events) if (!KEY_EVENTS.has(e.kind)) this.fxOut.push(e);

@@ -268,13 +268,13 @@ describe('联机同步：服务器模式（往返 220 ms，抖动 ±30 ms）', (
     const theirs = mine(c.confirmed!, 1);
     c.issue({ type: 'order', units: theirs, bx: 0, by: 15, target: -1 });
     for (let i = 0; i < 100; i++) c.issue({ type: 'order', units: mine(c.confirmed!, 0), bx: i % 16, by: 3, target: -1 });
-    let accepted = 0;
     const before = auth.open;
     clock.run(clock.t + 2_000, 1000 / 30, loop(clock, auth, clients, []));
     expect(theirs.every((pn) => !auth.game.people[pn].ordered || auth.game.people[pn].col !== 1)).toBe(true);
-    // 统计确认了多少条（权威每秒最多收 20 条）
-    accepted = 101 - (c as unknown as { pending: unknown[] }).pending.length;
-    expect(accepted).toBeLessThanOrEqual(22);
+    // 统计权威收下了多少条：额度 20 条，之后每秒补 20 条（被拒的指令客户端会重发一次，同样受限速）
+    const accepted = (auth as unknown as { seen: Set<number>[] }).seen[0].size;
+    expect(accepted).toBeLessThanOrEqual(20 + 2 * 20 + 2);
+    expect(accepted).toBeLessThan(101);
     expect(auth.open).toBeGreaterThan(before);
   });
 
@@ -362,5 +362,140 @@ describe('联机同步：玩家主机模式', () => {
     clock.run(20_000, 1000 / 30, loop(clock, auth, [host, p], [bot(host, 3), bot(p, 4)]));
     const s = settle(clock, auth, [host, p]);
     expect(s.clients).toEqual([s.auth, s.auth]);
+  });
+});
+
+describe('联机同步：丢失的指令', () => {
+  type Msg = { t: string; s?: number; pend?: unknown[] };
+  /** 单人对局；返回能在两个方向上丢消息的链路 */
+  function solo(oneWay: number, kind = 'sim') {
+    const clock = new SimClock();
+    const auth = new Authority({ game: mpGame(3, ['human', 'normal', 'normal', 'normal']), sched: clock, dropAi: 'normal', humanSeats: [true, false, false, false], waitFor: [0] });
+    const [a, b] = linkPair(clock, kind, oneWay);
+    const drop = { up: (_m: Msg) => false, down: (_m: Msg) => false };
+    const sent: Msg[] = [];
+    const bs = b.send.bind(b);
+    const as = a.send.bind(a);
+    b.send = (m: unknown) => {
+      sent.push(m as Msg);
+      if (!drop.up(m as Msg)) bs(m);
+    };
+    a.send = (m: unknown) => {
+      if (!drop.down(m as Msg)) as(m);
+    };
+    auth.attach(a, 0);
+    const c = new NetClient({ seat: 0, sched: clock });
+    c.attach(b);
+    const tick = () => {
+      auth.pump();
+      return c.frame(clock.t);
+    };
+    clock.run(15_000, 1000 / 60, tick);
+    const pending = () => (c as unknown as { pending: unknown[] }).pending.length;
+    return { clock, auth, c, b, drop, sent, tick, pending };
+  }
+
+  /** 一个离本部远的目标，让学生走很久 */
+  function farOrder(g: Game, pn: number) {
+    const pl = g.player[0];
+    return { type: 'order' as const, units: [pn], bx: 15 - pl.basex, by: 15 - pl.basey, target: -1 };
+  }
+
+  it('指令在路上丢了：客户端重发一次，权威执行；画面不会在原地和起步之间来回跳', () => {
+    for (const oneWay of [2, 29]) {
+      const { clock, auth, c, drop, tick, pending } = solo(oneWay);
+      const pn = mine(c.confirmed!, 0)[0];
+      let lost = 0;
+      drop.up = (m) => m.t === 'cmd' && lost++ === 0;
+      c.issue(farOrder(c.confirmed!, pn));
+      // 画面上这个学生的状态变了几次：修复前每重算一次预测就在原地和起步之间跳一次（3 秒上百次）
+      let flips = 0;
+      let last = -1;
+      clock.run(clock.t + 3_000, 1000 / 60, () => {
+        const stat = tick()!.game.people[pn].stat;
+        if (last >= 0 && stat !== last) flips++;
+        last = stat;
+      });
+      expect(lost).toBe(2); // 原来那条丢了，重发的那条送到
+      expect(pending()).toBe(0);
+      expect(c.stats().dropped).toBe(0);
+      expect(auth.game.people[pn].ordered).toBe(true);
+      expect(c.confirmed!.people[pn].stat).toBe(PS.WALK);
+      expect(flips).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it('一直收不到确认的指令过几秒放弃，不再留在预测里', () => {
+    const { clock, c, drop, tick, pending } = solo(2);
+    const pn = mine(c.confirmed!, 0)[0];
+    drop.up = (m) => m.t === 'cmd';
+    c.issue(farOrder(c.confirmed!, pn));
+    // 修复前：这条指令永远留着，每次重算预测都从头执行一遍，画面在两个姿态间来回跳
+    const poses = new Set<string>();
+    clock.run(clock.t + 3_000, 1000 / 60, () => tick());
+    clock.run(clock.t + 1_000, 1000 / 60, () => {
+      const v = tick()!;
+      poses.add(`${v.game.people[pn].stat}`);
+    });
+    expect(pending()).toBe(0);
+    expect(c.stats().dropped).toBe(1);
+    expect([...poses]).toEqual([String(c.confirmed!.people[pn].stat)]);
+  });
+
+  it('重连时一次重发 30 条待确认指令，全部被收下（不受每秒 20 条的限速）', () => {
+    const { clock, auth, c, b, drop, tick, pending } = solo(20);
+    const units = mine(c.confirmed!, 0);
+    drop.up = (m) => m.t === 'cmd';
+    // 连发 30 条（分散在 1.5 秒里，单看每秒的速率没超限），全丢
+    for (let i = 0; i < 30; i++) {
+      c.issue({ type: 'order', units: [units[i % units.length]], bx: i % 16, by: 5, target: -1 });
+      clock.run(clock.t + 50, 1000 / 60, tick);
+    }
+    drop.up = () => false;
+    c.attach(b);
+    clock.run(clock.t + 3_000, 1000 / 60, tick);
+    expect(pending()).toBe(0);
+    expect(c.stats().dropped).toBe(0);
+    expect((auth as unknown as { seen: Set<number>[] }).seen[0].size).toBe(30);
+  });
+
+  it('中转静默丢包：同一个缺口只请求一次补发，并带上丢掉的指令', () => {
+    for (const hole of [1500, 3000]) {
+      const { clock, auth, c, drop, sent, tick, pending } = solo(190, 'relay');
+      const units = mine(c.confirmed!, 0);
+      let on = true;
+      drop.up = () => on;
+      drop.down = () => on;
+      for (let i = 0; i < 3; i++) {
+        c.issue({ type: 'order', units: [units[i]], bx: 3 + i, by: 9, target: -1 });
+        clock.run(clock.t + hole / 4, 1000 / 60, tick);
+      }
+      clock.run(clock.t + hole / 4, 1000 / 60, tick);
+      on = false;
+      const from = sent.length;
+      clock.run(clock.t + 3_000, 1000 / 60, tick);
+      const syncs = sent.slice(from).filter((m) => m.t === 'sync');
+      expect(syncs.length).toBe(1);
+      expect(syncs[0].pend!.length).toBe(3);
+      expect(pending()).toBe(0);
+      expect(c.stats().dropped).toBe(0);
+      expect((auth as unknown as { seen: Set<number>[] }).seen[0].size).toBe(3);
+      const s = settle(clock, auth, [c]);
+      expect(s.clients).toEqual([s.auth]);
+    }
+  });
+
+  it('sync 之前到达的指令先存着，sync 之后照常执行', () => {
+    const clock = new SimClock();
+    const auth = new Authority({ game: mpGame(4, ['human', 'normal', 'normal', 'normal']), sched: clock, dropAi: 'normal', humanSeats: [true, false, false, false] });
+    const [a, b] = linkPair(clock, 'direct', 1);
+    auth.attach(a, 0);
+    const got: { t: string; c?: { s: number }[] }[] = [];
+    b.onMessage = (m) => got.push(m as (typeof got)[number]);
+    b.send({ t: 'cmd', s: 7, w: 0, c: { type: 'rally', bx: 3, by: 3 } });
+    clock.run(100, 10, () => auth.pump());
+    b.send({ t: 'sync', f: -1, tail: [], pend: [] });
+    clock.run(1000, 10, () => auth.pump());
+    expect(got.some((m) => m.t === 'b' && m.c!.some((st) => st.s === 7))).toBe(true);
   });
 });

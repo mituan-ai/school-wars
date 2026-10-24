@@ -132,7 +132,7 @@ const zh = {
   'power.tip': '势力（人数 + 营地，兽人按一半计）。超过 40% 的学校会成为众矢之的',
   'hud.top.tip.remake': '{name} 领先过多，电脑阵营会优先攻击它',
   'tips.body.remake':
-    '拖框或点击选中己方学生（Shift 加选），右键地面移动，右键敌人攻击。A 再点地面：进攻移动，沿途遇敌就打。H：选中的人撤回泉水或本部回血（没选人时撤回所有重伤的人）。\n学生闲下来会坐下：坐在营地上占领它，加快增援；坐在己方泉水或本部上回血。\n敌人在你的本部上坐满约 33 秒·人，本部就会沦陷：停止增援、不能回血，派人坐回去就能夺回。本部沦陷且无人时出局。\n四个种族各有特长：人族占领快，兽人增援快，矮人回血快，精灵难被打中。\nCtrl+数字编队，数字键选队（连按两次跳转）；双击学生选中屏幕内全部己方学生；点校舍后右键地面设置集结点。空格拖动、方向键或小地图移动视野，滚轮缩放。',
+    '拖框或点击选中己方学生（Shift 加选），右键地面移动，右键敌人攻击。A 再点地面：进攻移动，沿途遇敌就打。H：选中的人里没满血的撤回泉水或本部回血，满血的不动（没选人时撤回所有重伤的人）。\n学生闲下来会坐下：坐在营地上占领它，加快增援；坐在己方泉水或本部上回血。\n敌人在你的本部上坐满约 33 秒·人，本部就会沦陷：停止增援、不能回血，派人坐回去就能夺回。本部沦陷且无人时出局。\n四个种族各有特长：人族占领快，兽人增援快，矮人回血快，精灵难被打中。\nCtrl+数字编队，数字键选队（连按两次跳转）；双击学生选中屏幕内全部己方学生；点校舍后右键地面设置集结点。空格拖动、方向键或小地图移动视野，滚轮缩放。',
   'settings.on': '开',
   'settings.off': '关',
   'title.online': '联机对战',
@@ -329,7 +329,7 @@ const en: Record<keyof typeof zh, string> = {
   'power.tip': 'Power (students + camps, Orcs count half). A school above 40% becomes the common target',
   'hud.top.tip.remake': '{name} is far ahead — computer schools will go after it first',
   'tips.body.remake':
-    'Drag or click to select your students (Shift adds); right-click ground to move, right-click an enemy to attack. A, then click ground: attack-move, fighting anything on the way. H: selected students fall back to a spring or base to heal (with nothing selected, every badly hurt student does).\nIdle students sit: on a camp they capture it and speed up reinforcements; on your own spring or base they heal.\nIf enemies sit on your base for about 33 student-seconds it falls: no reinforcements, no healing — sit on it again to retake it. A school is out when its base has fallen and no students remain.\nEach race has a strength: Humans capture fast, Orcs reinforce fast, Dwarves heal fast, Elves are hard to hit.\nCtrl+number makes a group, number selects it (press twice to jump there); double-click a student to select all on screen; click your school building, then right-click ground to set a rally point. Space-drag, arrow keys or the minimap to scroll; wheel to zoom.',
+    'Drag or click to select your students (Shift adds); right-click ground to move, right-click an enemy to attack. A, then click ground: attack-move, fighting anything on the way. H: selected students who are hurt fall back to a spring or base to heal; healthy ones stay (with nothing selected, every badly hurt student does).\nIdle students sit: on a camp they capture it and speed up reinforcements; on your own spring or base they heal.\nIf enemies sit on your base for about 33 student-seconds it falls: no reinforcements, no healing — sit on it again to retake it. A school is out when its base has fallen and no students remain.\nEach race has a strength: Humans capture fast, Orcs reinforce fast, Dwarves heal fast, Elves are hard to hit.\nCtrl+number makes a group, number selects it (press twice to jump there); double-click a student to select all on screen; click your school building, then right-click ground to set a rally point. Space-drag, arrow keys or the minimap to scroll; wheel to zoom.',
   'settings.on': 'On',
   'settings.off': 'Off',
   'title.online': 'Online',

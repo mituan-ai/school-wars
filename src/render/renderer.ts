@@ -13,6 +13,8 @@ import { drawStudent, drawStudentShadow } from './student.ts';
 export const BOARD_W = BSIZE * 48; // 菱形半宽
 export const BOARD_H = BSIZE * 48; // 菱形高
 const CURB = 5; // 操场路沿的高度
+/** 视野能看到的范围（世界坐标 x0, y0, x1, y1）：操场外留一格宽的草地，顶上多留出校舍的高度 */
+const VIEW_BOUNDS = [-BOARD_W - 96, -130, BOARD_W + 96, BOARD_H + 96] as const;
 
 export class Camera {
   x = 0;
@@ -29,10 +31,18 @@ export class Camera {
     return [(sx - this.w / 2) / this.zoom + this.x, (sy - this.h / 2) / this.zoom + this.y];
   }
 
+  /**
+   * 视野只在操场周围一圈之内移动：最小缩放时整个操场正好放得下，平移时屏幕边缘不越过这一圈，
+   * 不会出现大半屏草地
+   */
   clamp(): void {
-    this.zoom = Math.min(3.5, Math.max(0.6, this.zoom));
-    this.x = Math.min(BOARD_W, Math.max(-BOARD_W, this.x));
-    this.y = Math.min(BOARD_H, Math.max(0, this.y));
+    const [x0, y0, x1, y1] = VIEW_BOUNDS;
+    const fit = Math.min(this.w / (x1 - x0), this.h / (y1 - y0));
+    this.zoom = Math.min(3.5, Math.max(Math.min(1, Math.max(0.6, fit)), this.zoom));
+    const hw = this.w / 2 / this.zoom;
+    const hh = this.h / 2 / this.zoom;
+    this.x = hw * 2 >= x1 - x0 ? (x0 + x1) / 2 : Math.min(x1 - hw, Math.max(x0 + hw, this.x));
+    this.y = hh * 2 >= y1 - y0 ? (y0 + y1) / 2 : Math.min(y1 - hh, Math.max(y0 + hh, this.y));
   }
 
   /** 世界坐标点是否在当前视野内（原版 is_inside，用于决定是否播放音效） */

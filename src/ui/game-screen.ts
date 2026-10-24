@@ -402,11 +402,9 @@ export class GameScreen {
     const g = this.game;
     const pl = g.player[this.me];
     if (pl && this.me < 4) {
-      // 以本部为中心，再向地图中央偏移 30%，少露一些棋盘外的空白
-      const bx = pl.basex * 48 - pl.basey * 48;
-      const by = pl.basey * 24 + pl.basex * 24 + 24;
-      this.cam.x = bx * 0.7;
-      this.cam.y = by * 0.7 + 384 * 0.3;
+      // 对准本部；视野不越过操场周围一圈（Camera.clamp），本部会落在靠屏幕边的位置
+      this.cam.x = pl.basex * 48 - pl.basey * 48;
+      this.cam.y = pl.basey * 24 + pl.basex * 24 + 24;
     } else {
       this.cam.x = 0;
       this.cam.y = 384;
@@ -530,7 +528,7 @@ export class GameScreen {
   }
 
   /**
-   * 撤退回血：选中的人各自走向最近的己方泉水或未沦陷的本部；没选人时撤回所有生命不到一半的人。
+   * 撤退回血：选中的人里没满血的各自走向最近的己方泉水或未沦陷的本部（满血的不动）；没选人时撤回所有生命不到一半的人。
    * 只是替玩家下几道普通移动指令。
    */
   private retreat(): void {
@@ -544,7 +542,8 @@ export class GameScreen {
         if (p.stat > PS.DEAD && p.col === me && p.hp < p.mhp * 0.5) units.push(i);
       }
     }
-    units = units.filter((pn) => g.people[pn].stat > PS.DEAD);
+    // 满血的人不用回去，留在原地
+    units = units.filter((pn) => g.people[pn].stat > PS.DEAD && g.people[pn].hp < g.people[pn].mhp);
     const spots = g.area.filter((a) => a.col === me && (a.areatype === AREA.HEART || (a.areatype === AREA.BASE && !a.fallen)));
     if (units.length === 0 || spots.length === 0) {
       this.showBanner(t(spots.length ? 'hud.retreat.none' : 'hud.retreat.nospot'), false, true);

@@ -57,7 +57,7 @@ Punches land 50% of the time, and a whiff shows "miss". A hit interrupts the tar
 | Select | Left-click or drag a box · `Shift` + click to add or remove, `Shift` + drag to add · double-click a student to select all of yours on screen · `Ctrl` + `A` selects everyone |
 | Move / attack | Right-click the ground / right-click an enemy |
 | Attack-move | `A`, then click the ground: fight any enemy within 6 cells on the way, then keep going |
-| Retreat to heal | `H`: selected students walk to your nearest spring or base; with nothing selected, all wounded students retreat · `Shift` + `H` selects all wounded |
+| Retreat to heal | `H`: selected students who are hurt walk to your nearest spring or base (healthy ones stay); with nothing selected, all badly wounded students retreat · `Shift` + `H` selects all wounded |
 | Groups | `Ctrl` or `Shift` + number to assign · number to select · press twice to jump the camera there |
 | Rally point | Click your school building, then right-click the ground; new students walk there · right-click your base to clear it |
 | Camera | `Space` + drag · `WASD` / arrow keys · click the minimap · mouse wheel to zoom |
